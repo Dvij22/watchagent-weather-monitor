@@ -1,0 +1,16 @@
+---
+When logging in this codebase:
+- Always use structlog, never print() or stdlib logging directly
+- Every logger must be bound with context before use:
+    poller: bind city="Ottawa" and component="poller"
+    API:    bind path, method, request_id
+- Log level conventions:
+    DEBUG:   raw API response bodies only
+    INFO:    reading stored, event fired, request completed
+    WARNING: poll failed after retries — must include city (str),
+             http_status (int|None), attempt_count (int), error_msg (str)
+    ERROR:   DB connection failure, unhandled exception
+- A duplicate reading is NOT an error — log at INFO with duplicate=True
+- Every WARNING for a failed poll must include exactly these fields:
+  city, http_status, attempt_count, error_msg. No exceptions.
+---
