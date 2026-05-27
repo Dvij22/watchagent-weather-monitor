@@ -1,0 +1,196 @@
+"""Integration tests for the FastAPI routes.
+
+All tests use the test_client fixture (TestClient wired to the test DB)
+and seed data via a direct session on the same engine.  No real HTTP calls
+or external services are involved.
+"""
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy.orm import sessionmaker
+
+from app.repositories.event_repo import EventRepository
+from app.repositories.reading_repo import ReadingRepository
+from tests.conftest import sample_reading
+
+_BASE_TS = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+_SAMPLE_EVENT = {
+    "city": "Ottawa",
+    "event_type": "feels_like_gap",
+    "timestamp": _BASE_TS,
+    "summary": "Ottawa feels 11°C colder than the actual temperature.",
+    "reason": "Apparent temp (-6°C) deviates 11°C from actual (5°C), exceeding 8°C threshold.",
+    "metrics": {"temperature": 5.0, "apparent_temperature": -6.0, "gap": 11.0},
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _seed(engine, readings=(), events=()):
+    """Insert readings and events into the test DB and close the session."""
+    _Session = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    db = _Session()
+    try:
+        r_repo = ReadingRepository(db)
+        for r in readings:
+            r_repo.insert(r)
+        e_repo = EventRepository(db)
+        for e in events:
+            e_repo.insert(e)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# /health
+# ---------------------------------------------------------------------------
+
+def test_health_ok_empty_db(test_client):
+    """Health route returns 200 with zero counts on an empty DB."""
+    resp = test_client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["readings_stored"] == 0
+    assert data["events_stored"] == 0
+
+
+def test_health_returns_accurate_counts(engine, test_client):
+    """Counts reflect exactly the seeded rows — not hardcoded values."""
+    _seed(
+        engine,
+        readings=[
+            sample_reading(timestamp=_BASE_TS),
+            sample_reading(timestamp=_BASE_TS + timedelta(hours=1)),
+            sample_reading(timestamp=_BASE_TS + timedelta(hours=2)),
+        ],
+        events=[_SAMPLE_EVENT],
+    )
+
+    resp = test_client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["readings_stored"] == 3
+    assert data["events_stored"] == 1
+
+
+# ---------------------------------------------------------------------------
+# /readings
+# ---------------------------------------------------------------------------
+
+def test_readings_returns_all_cities_without_filter(engine, test_client):
+    """Without a city filter, readings from all cities are returned."""
+    _seed(
+        engine,
+        readings=[
+            sample_reading(city="Ottawa", timestamp=_BASE_TS),
+            sample_reading(city="Toronto", timestamp=_BASE_TS),
+            sample_reading(city="Vancouver", timestamp=_BASE_TS),
+        ],
+    )
+
+    resp = test_client.get("/readings")
+    assert resp.status_code == 200
+    data = resp.json()
+    cities = {r["city"] for r in data["readings"]}
+    assert cities == {"Ottawa", "Toronto", "Vancouver"}
+
+
+def test_readings_city_filter_returns_only_matching(engine, test_client):
+    """?city=Ottawa returns only Ottawa readings."""
+    _seed(
+        engine,
+        readings=[
+            sample_reading(city="Ottawa", timestamp=_BASE_TS),
+            sample_reading(city="Ottawa", timestamp=_BASE_TS + timedelta(hours=1)),
+            sample_reading(city="Toronto", timestamp=_BASE_TS),
+        ],
+    )
+
+    resp = test_client.get("/readings?city=Ottawa")
+    assert resp.status_code == 200
+    readings = resp.json()["readings"]
+    assert len(readings) == 2
+    assert all(r["city"] == "Ottawa" for r in readings)
+
+
+def test_readings_returned_newest_first(engine, test_client):
+    """Readings are ordered newest-first."""
+    t0 = _BASE_TS
+    t1 = _BASE_TS + timedelta(hours=1)
+    t2 = _BASE_TS + timedelta(hours=2)
+
+    _seed(
+        engine,
+        readings=[
+            sample_reading(timestamp=t0),
+            sample_reading(timestamp=t1),
+            sample_reading(timestamp=t2),
+        ],
+    )
+
+    resp = test_client.get("/readings?city=Ottawa")
+    timestamps = [r["timestamp"] for r in resp.json()["readings"]]
+    assert timestamps == sorted(timestamps, reverse=True)
+
+
+def test_readings_limit_respected(engine, test_client):
+    """?limit=1 returns at most one reading."""
+    _seed(
+        engine,
+        readings=[
+            sample_reading(timestamp=_BASE_TS),
+            sample_reading(timestamp=_BASE_TS + timedelta(hours=1)),
+        ],
+    )
+
+    resp = test_client.get("/readings?limit=1")
+    assert len(resp.json()["readings"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# /events
+# ---------------------------------------------------------------------------
+
+def test_events_response_has_events_key(engine, test_client):
+    """Response body always has an 'events' key even when no events exist."""
+    resp = test_client.get("/events")
+    assert resp.status_code == 200
+    assert "events" in resp.json()
+
+
+def test_events_shape_has_all_required_fields(engine, test_client):
+    """Every event object contains all 6 schema-required fields plus id/created_at."""
+    _seed(engine, events=[_SAMPLE_EVENT])
+
+    resp = test_client.get("/events")
+    events = resp.json()["events"]
+    assert len(events) == 1
+
+    required_fields = {"id", "city", "event_type", "timestamp", "summary", "reason", "metrics", "created_at"}
+    assert required_fields.issubset(set(events[0].keys()))
+
+
+def test_events_city_filter(engine, test_client):
+    """?city=Ottawa returns only Ottawa events."""
+    toronto_event = {**_SAMPLE_EVENT, "city": "Toronto"}
+    _seed(engine, events=[_SAMPLE_EVENT, toronto_event])
+
+    resp = test_client.get("/events?city=Ottawa")
+    events = resp.json()["events"]
+    assert len(events) == 1
+    assert events[0]["city"] == "Ottawa"
+
+
+def test_events_metrics_is_dict(engine, test_client):
+    """metrics field is deserialised as a dict, not a string."""
+    _seed(engine, events=[_SAMPLE_EVENT])
+
+    resp = test_client.get("/events")
+    metrics = resp.json()["events"][0]["metrics"]
+    assert isinstance(metrics, dict)
+    assert "gap" in metrics
