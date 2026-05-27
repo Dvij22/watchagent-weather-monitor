@@ -8,8 +8,10 @@ import structlog
 
 from app.config import get_settings
 from app.database import SessionLocal
+from app.models.reading import WeatherReading
 from app.repositories.event_repo import EventRepository
 from app.repositories.reading_repo import ReadingRepository
+from app.services.event_detector import EventDetector
 from app.services.weather_client import CITIES, RawReading, WeatherClient
 
 _logger = structlog.get_logger(__name__).bind(component="poller")
@@ -26,8 +28,13 @@ class Poller:
     4. Sleeps for POLL_INTERVAL_SECONDS before the next cycle.
     """
 
-    def __init__(self, client: WeatherClient | None = None) -> None:
+    def __init__(
+        self,
+        client: WeatherClient | None = None,
+        detector: EventDetector | None = None,
+    ) -> None:
         self._client = client or WeatherClient()
+        self._detector = detector or EventDetector()
 
     async def run(self) -> None:
         """Poll forever. Logs and continues on per-city errors; never silently swallows."""
@@ -97,12 +104,26 @@ class Poller:
     async def _run_event_detection(
         self,
         reading: RawReading,
-        history: list,
+        history: list[WeatherReading],
         db: object,
         log: structlog.BoundLogger,  # type: ignore[type-arg]
     ) -> None:
-        """Placeholder for EventDetector integration (Phase N).
+        """Run all event checks and persist any that fired."""
+        from sqlalchemy.orm import Session as _Session
 
-        Will call EventDetector.detect(reading, history), persist any events
-        via EventRepository, and log each fired event at INFO.
-        """
+        events = self._detector.detect_events(reading, history)
+        if not events:
+            return
+
+        event_repo = EventRepository(db)  # type: ignore[arg-type]
+        for event_data in events:
+            try:
+                event_repo.insert(event_data)
+            except Exception:
+                log.error(
+                    "event_persist_failed",
+                    city=reading.city,
+                    event_type=event_data.get("event_type"),
+                    exc_info=True,
+                )
+                raise
