@@ -1,23 +1,43 @@
 services:
-  db:
-    image: postgres:16
+
+  postgres:
+    image: postgres:15
     environment:
       POSTGRES_USER: watchagent
       POSTGRES_PASSWORD: watchagent
       POSTGRES_DB: watchagent
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U watchagent -d watchagent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
-  app:
-    build: .
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     ports:
       - "8000:8000"
     env_file:
       - .env
     depends_on:
-      - db
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  poller:
+    build:
+      context: .
+      dockerfile: Dockerfile.poller
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
 
 volumes:
   postgres_data:

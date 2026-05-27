@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install build tools needed by some wheels (e.g. psycopg2-binary)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only the dependency manifest first so pip layer is cached
+# unless pyproject.toml changes.
+COPY pyproject.toml .
+
+# Install runtime dependencies declared in [project.dependencies].
+# --no-build-isolation keeps the build lean; hatchling is not needed
+# at runtime so we install only the package's own deps.
+RUN pip install --no-cache-dir \
+        fastapi \
+        "uvicorn[standard]" \
+        sqlalchemy \
+        psycopg2-binary \
+        alembic \
+        pydantic-settings \
+        httpx \
+        tenacity \
+        structlog
+
+COPY app/ app/
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
