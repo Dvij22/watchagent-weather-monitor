@@ -174,7 +174,7 @@ A 3-hour in-memory cooldown per `(city, event_type)` pair prevents re-firing on 
 Enforces `structlog` throughout and bans `print()` and stdlib `logging`. Every WARNING for a failed poll must include exactly four fields: `city`, `http_status`, `attempt_count`, `error_msg`. This rule exists because inconsistent log fields make alerting impossible — a field that appears in 80% of failure logs is not a reliable alert target.
 
 **`event_schema.mdc`**
-Locks the event dict to exactly six keys and the `event_type` to one of nine allowed strings. The `reason` field must include both the threshold and the actual value that triggered it. This rule prevents detectors from drifting into undocumented formats that break the API response schema or make events uninterpretable in dashboards.
+Locks the event dict to exactly six keys and the `event_type` to one of ten allowed strings. The `reason` field must include both the threshold and the actual value that triggered it. This rule prevents detectors from drifting into undocumented formats that break the API response schema or make events uninterpretable in dashboards.
 
 ### Agent
 
@@ -186,8 +186,28 @@ A scoped senior-engineer persona that reviews detector methods against five crit
 **`data_analysis.py`**
 A CLI tool with four analysis modes (`summary`, `trends`, `anomalies`, `compare`) that queries the live database and prints structured output. Designed to answer operational questions — "how many events fired this week?", "which city has the widest temperature range?" — without opening a DB client or writing ad-hoc SQL.
 
+Run from inside the running stack (postgres port 5432 is also exposed to the host on the same port):
+
+```bash
+# Inside the API container (DATABASE_URL is already set from .env)
+docker compose exec api python .cursor/skills/data_analysis.py --question summary
+docker compose exec api python .cursor/skills/data_analysis.py --question trends
+docker compose exec api python .cursor/skills/data_analysis.py --question anomalies
+docker compose exec api python .cursor/skills/data_analysis.py --question compare
+
+# Or from the host (requires DATABASE_URL pointing to localhost)
+DATABASE_URL=postgresql://watchagent:watchagent@localhost:5432/watchagent \
+  python .cursor/skills/data_analysis.py --question summary
+```
+
 **`replay_detection.py`**
 Loads the last N readings per city from the database and re-runs the `EventDetector` over them in chronological order. Indispensable when adding a new event type: run it against real historical data to verify the threshold fires on actual weather conditions before shipping.
+
+```bash
+docker compose exec api python .cursor/skills/replay_detection.py
+docker compose exec api python .cursor/skills/replay_detection.py --n 96
+docker compose exec api python .cursor/skills/replay_detection.py --n 48 --city Ottawa
+```
 
 ---
 

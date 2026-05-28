@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir \
         structlog
 
 COPY app/ app/
+COPY .cursor/ .cursor/
 
 EXPOSE 8000
 
