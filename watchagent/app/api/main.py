@@ -3,10 +3,11 @@
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
 import structlog
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
 
 from app.api.routes import events, health, readings
 from app.database import engine
@@ -15,24 +16,23 @@ from app.models import Base
 _logger = structlog.get_logger(__name__)
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Create DB tables on startup (idempotent); nothing to clean up on shutdown."""
+    _logger.info("db_init_start")
+    Base.metadata.create_all(bind=engine)
+    _logger.info("db_init_complete")
+    yield
+
+
 def create_app() -> FastAPI:
     """Construct and configure the FastAPI application."""
     app = FastAPI(
         title="WatchAgent",
         version="1.0.0",
         description="Weather monitoring API for Ottawa, Toronto, and Vancouver.",
+        lifespan=_lifespan,
     )
-
-    # ------------------------------------------------------------------ #
-    # Startup                                                              #
-    # ------------------------------------------------------------------ #
-
-    @app.on_event("startup")
-    def on_startup() -> None:
-        """Create DB tables on first boot (idempotent)."""
-        _logger.info("db_init_start")
-        Base.metadata.create_all(bind=engine)
-        _logger.info("db_init_complete")
 
     # ------------------------------------------------------------------ #
     # Logging middleware                                                   #

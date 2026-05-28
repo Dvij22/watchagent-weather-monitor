@@ -127,7 +127,23 @@ Tests use SQLite in-memory with `StaticPool` — no running Postgres required. A
 
 ## Event Detection
 
-The `EventDetector` runs nine checks against every new reading using the previous 24 readings as history. Each check returns `None` or an event dict with six required keys: `city`, `event_type`, `timestamp`, `summary`, `reason`, `metrics`.
+### Design decisions
+
+The central question is not "what can we detect?" but "what is worth surfacing?" Open-Meteo provides temperature, apparent temperature, precipitation, wind speed, and WMO weather code. From those five fields, dozens of checks are possible. We narrowed to nine using three criteria:
+
+1. **Operationally actionable.** An event should tell a person something they can act on — dress differently, avoid driving, prepare for a power outage. A statistically unusual reading that has no practical consequence is noise, not signal.
+
+2. **Distinguishable from normal Canadian seasonal variation.** A 2 °C temperature drop in Ottawa in November is unremarkable. The thresholds are set so that events would *not* fire daily under typical conditions for these specific cities.
+
+3. **Detectable from available fields without external reference data.** Every check uses only what Open-Meteo provides. We deliberately avoided checks that would require historical climatology databases, forecast data, or cross-API lookups, because those introduce dependencies that break availability.
+
+`feels_like_gap` and `city_anomaly` are the two most deliberate choices. `feels_like_gap` fires when apparent temperature diverges sharply from actual — a condition that is genuinely dangerous (hypothermia risk, heat stress) and invisible to anyone who only checks the temperature number. `city_anomaly` detects readings that are statistically unusual *relative to that city's recent baseline*, which means it self-calibrates: an Ottawa reading of −20 °C is normal in February but anomalous in October, and the detector handles both correctly without hardcoded seasonal rules.
+
+Checks we considered and rejected: UV index (not in the Open-Meteo current-weather fields), humidity (not available in the free tier endpoint we use), and day-over-day comparison (requires 24+ hours of history before it can fire at all, making it useless for a freshly deployed instance).
+
+### Thresholds and calibration
+
+The `EventDetector` runs all nine checks against every new reading using the previous 24 readings as history. Each check returns `None` or an event dict with six required keys: `city`, `event_type`, `timestamp`, `summary`, `reason`, `metrics`.
 
 A 3-hour in-memory cooldown per `(city, event_type)` pair prevents re-firing on sustained conditions.
 
