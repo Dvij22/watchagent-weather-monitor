@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  # -------------------------------------------------------------------------
+  # Job 1 — run the full pytest suite against a real Postgres instance
+  # -------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: watchagent
+          POSTGRES_PASSWORD: watchagent
+          POSTGRES_DB: watchagent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U watchagent -d watchagent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://watchagent:watchagent@localhost:5432/watchagent
+      POLL_INTERVAL_SECONDS: "300"
+      LOG_LEVEL: INFO
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies (runtime + dev extras)
+        run: pip install -e ".[dev]"
+        working-directory: watchagent
+
+      - name: Run tests with coverage
+        run: pytest tests/ -v --cov=app --cov-report=term-missing
+        working-directory: watchagent
+
+  # -------------------------------------------------------------------------
+  # Job 2 — verify both Docker images build successfully
+  # No runtime env vars are needed; this only validates the build layer.
+  # -------------------------------------------------------------------------
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -f Dockerfile.api -t watchagent-api .
+        working-directory: watchagent
+
+      - name: Build poller image
+        run: docker build -f Dockerfile.poller -t watchagent-poller .
+        working-directory: watchagent
