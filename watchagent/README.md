@@ -1,6 +1,6 @@
 # WatchAgent
 
-A weather monitoring service that polls [Open-Meteo](https://open-meteo.com/) every 5 minutes for Ottawa, Toronto, and Vancouver, persists readings to PostgreSQL, runs nine event detectors against each new reading, and exposes the stored data through a FastAPI REST API. The system is designed for reliable unattended operation: failed polls are retried with backoff, duplicate readings are silently discarded, and event spam on sustained conditions is suppressed by a per-city, per-type cooldown.
+A weather monitoring service that polls [Open-Meteo](https://open-meteo.com/) every 5 minutes for Ottawa, Toronto, and Vancouver, persists readings to PostgreSQL, runs ten event detectors against each new reading, and exposes the stored data through a FastAPI REST API. The system is designed for reliable unattended operation: failed polls are retried with backoff, duplicate readings are silently discarded, and event spam on sustained conditions is suppressed by a per-city, per-type cooldown.
 
 ---
 
@@ -121,7 +121,7 @@ pip install -e ".[dev]"
 pytest tests/ -v --cov=app --cov-report=term-missing
 ```
 
-Tests use SQLite in-memory with `StaticPool` — no running Postgres required. All 41 tests complete in under one second.
+Tests use SQLite in-memory with `StaticPool` — no running Postgres required. All 55 tests complete in under one second.
 
 ---
 
