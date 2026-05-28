@@ -6,7 +6,7 @@ Every event dict produced by EventDetector must contain exactly these keys:
 event_type must be one of these exact strings (no others):
   sudden_temp_drop, sudden_temp_rise, city_anomaly, feels_like_gap,
   dangerous_wind, wind_shift, heavy_precipitation, precip_streak,
-  weather_code_severity
+  weather_code_severity, cross_city_divergence
 
 summary is one sentence, human-readable, no jargon.
 reason explains WHY the detector fired — include threshold and actual value.

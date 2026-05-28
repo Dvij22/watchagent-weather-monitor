@@ -279,6 +279,95 @@ def test_cooldown_prevents_spam_within_3_hours():
     assert "feels_like_gap" not in _event_types(second)
 
 
+def test_sudden_temp_drop_adaptive_threshold_low_stddev():
+    """With low-stddev history (stable city like Vancouver), the threshold adapts above 5 °C.
+
+    6 identical readings → stddev is very low → threshold stays at the 5 °C floor.
+    A 5.1 °C drop still fires.
+    """
+    history = [_history_reading(temperature=20.0) for _ in range(6)]
+    reading = sample_reading(temperature=14.8, apparent_temperature=14.8)  # drop of 5.2 °C
+    events = _detect(reading, history)
+    assert "sudden_temp_drop" in _event_types(events)
+
+
+def test_sudden_temp_drop_adaptive_threshold_high_stddev():
+    """With high-stddev history (volatile city), the threshold rises above 5 °C so
+    a marginal 5 °C drop that would fire with no history does NOT fire.
+
+    Stddev of [5, 15, 5, 15, 5, 15] ≈ 5.48, threshold = max(5.0, 5.48 * 2) ≈ 10.96 °C.
+    A 6 °C drop falls below that and should not fire.
+    """
+    history = [
+        _history_reading(temperature=t) for t in [5, 15, 5, 15, 5, 15]
+    ]
+    reading = sample_reading(temperature=9.0, apparent_temperature=9.0)  # prev=15, drop=6 °C
+    events = _detect(reading, history)
+    assert "sudden_temp_drop" not in _event_types(events)
+
+
+def test_adaptive_threshold_recorded_in_metrics():
+    """The threshold used should be recorded in the event metrics."""
+    history = [_history_reading(temperature=20.0) for _ in range(6)]
+    reading = sample_reading(temperature=14.0, apparent_temperature=14.0)  # drop of 6 °C
+    events = _detect(reading, history)
+    temp_events = [e for e in events if e["event_type"] == "sudden_temp_drop"]
+    assert temp_events, "expected sudden_temp_drop to fire"
+    assert "threshold" in temp_events[0]["metrics"]
+
+
+def test_cross_city_divergence_fires():
+    """When one city is 16 °C warmer than the average of the other two, the event fires."""
+    detector = EventDetector()
+    readings = {
+        "Vancouver": sample_reading(city="Vancouver", temperature=20.0, apparent_temperature=20.0),
+        "Ottawa": sample_reading(city="Ottawa", temperature=3.0, apparent_temperature=3.0),
+        "Toronto": sample_reading(city="Toronto", temperature=5.0, apparent_temperature=5.0),
+    }
+    # Vancouver avg_others = (3+5)/2 = 4, divergence = 16 °C → should fire
+    events = detector.detect_cross_city_events(readings)
+    assert len(events) == 1
+    assert events[0]["event_type"] == "cross_city_divergence"
+    assert events[0]["city"] == "Vancouver"
+
+
+def test_cross_city_divergence_no_fire():
+    """When spread is within 15 °C, no event should fire."""
+    detector = EventDetector()
+    readings = {
+        "Vancouver": sample_reading(city="Vancouver", temperature=5.0, apparent_temperature=5.0),
+        "Ottawa": sample_reading(city="Ottawa", temperature=-8.0, apparent_temperature=-8.0),
+        "Toronto": sample_reading(city="Toronto", temperature=-5.0, apparent_temperature=-5.0),
+    }
+    # Vancouver avg_others = (-8 + -5)/2 = -6.5, divergence = 11.5 °C → should not fire
+    events = detector.detect_cross_city_events(readings)
+    assert not events
+
+
+def test_cross_city_divergence_requires_all_three_cities():
+    """If fewer than 3 cities have readings, the check must not fire."""
+    detector = EventDetector()
+    readings = {
+        "Vancouver": sample_reading(city="Vancouver", temperature=20.0, apparent_temperature=20.0),
+    }
+    events = detector.detect_cross_city_events(readings)
+    assert not events
+
+
+def test_cross_city_divergence_cooldown():
+    """A second call with the same divergent conditions within the cooldown window is suppressed."""
+    detector = EventDetector()
+    readings = {
+        "Vancouver": sample_reading(city="Vancouver", temperature=20.0, apparent_temperature=20.0),
+        "Ottawa": sample_reading(city="Ottawa", temperature=3.0, apparent_temperature=3.0),
+        "Toronto": sample_reading(city="Toronto", temperature=5.0, apparent_temperature=5.0),
+    }
+    first = detector.detect_cross_city_events(readings)
+    assert first, "expected first call to fire"
+    second = detector.detect_cross_city_events(readings)
+    assert not second, "expected cooldown to suppress second call"
+
+
 def test_cooldown_is_per_city():
     """Cooldown for Ottawa does not suppress the same event type for Toronto."""
     detector = EventDetector()

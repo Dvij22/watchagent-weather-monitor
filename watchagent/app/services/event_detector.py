@@ -33,6 +33,12 @@ EventDict = dict[str, Any]
 
 _COOLDOWN = timedelta(hours=3)
 
+# Minimum absolute drop/rise before the adaptive threshold kicks in.
+# When history is available, the threshold is max(_MIN_TEMP_DELTA, stddev * 2)
+# so that the same 5 °C change is correctly more alarming in stable Vancouver
+# (low stddev) than in volatile Ottawa (high stddev).
+_MIN_TEMP_DELTA = 5.0
+
 # WMO code severity tiers
 _SEVERITY_TIER: dict[str, int] = {
     "thunderstorm": 95,
@@ -136,6 +142,21 @@ class EventDetector:
     # Checks
     # ------------------------------------------------------------------
 
+    def _temp_delta_threshold(self, history: list[WeatherReading]) -> float:
+        """Return an adaptive threshold based on the city's observed temperature variability.
+
+        When fewer than 6 readings exist, falls back to the fixed minimum.
+        When history is available, uses 2× the recent stddev so that the same
+        absolute change is correctly more alarming in stable Vancouver (low
+        stddev, oceanic climate) than in volatile Ottawa (high stddev,
+        continental climate).
+        """
+        if len(history) < 6:
+            return _MIN_TEMP_DELTA
+        temps = [r.temperature for r in history]
+        stddev = statistics.stdev(temps)
+        return max(_MIN_TEMP_DELTA, stddev * 2)
+
     def _check_sudden_temp_drop(
         self, new: RawReading, history: list[WeatherReading]
     ) -> EventDict | None:
@@ -143,7 +164,8 @@ class EventDetector:
             return None
         prev_temp = history[0].temperature
         delta = prev_temp - new.temperature
-        if delta <= 5.0:
+        threshold = self._temp_delta_threshold(history)
+        if delta <= threshold:
             return None
         return _event(
             city=new.city,
@@ -152,9 +174,9 @@ class EventDetector:
             summary=f"{new.city} temperature dropped {delta:.1f}°C in one reading.",
             reason=(
                 f"Temperature fell from {prev_temp:.1f}°C to {new.temperature:.1f}°C "
-                f"(drop of {delta:.1f}°C), exceeding the 5°C threshold."
+                f"(drop of {delta:.1f}°C), exceeding the city-adaptive threshold of {threshold:.1f}°C."
             ),
-            metrics={"previous_temperature": prev_temp, "temperature": new.temperature, "delta": delta},
+            metrics={"previous_temperature": prev_temp, "temperature": new.temperature, "delta": round(delta, 2), "threshold": round(threshold, 2)},
         )
 
     def _check_sudden_temp_rise(
@@ -164,7 +186,8 @@ class EventDetector:
             return None
         prev_temp = history[0].temperature
         delta = new.temperature - prev_temp
-        if delta <= 5.0:
+        threshold = self._temp_delta_threshold(history)
+        if delta <= threshold:
             return None
         return _event(
             city=new.city,
@@ -173,9 +196,9 @@ class EventDetector:
             summary=f"{new.city} temperature rose {delta:.1f}°C in one reading.",
             reason=(
                 f"Temperature rose from {prev_temp:.1f}°C to {new.temperature:.1f}°C "
-                f"(rise of {delta:.1f}°C), exceeding the 5°C threshold."
+                f"(rise of {delta:.1f}°C), exceeding the city-adaptive threshold of {threshold:.1f}°C."
             ),
-            metrics={"previous_temperature": prev_temp, "temperature": new.temperature, "delta": delta},
+            metrics={"previous_temperature": prev_temp, "temperature": new.temperature, "delta": round(delta, 2), "threshold": round(threshold, 2)},
         )
 
     def _check_city_anomaly(
@@ -325,3 +348,85 @@ class EventDetector:
                 "new_tier": new_tier,
             },
         )
+
+    # ------------------------------------------------------------------
+    # Cross-city comparison (called from Poller after all cities fetched)
+    # ------------------------------------------------------------------
+
+    def detect_cross_city_events(
+        self,
+        readings: dict[str, RawReading],
+    ) -> list[EventDict]:
+        """Detect events that require comparing conditions across all three cities.
+
+        Args:
+            readings: Mapping of city name → the latest RawReading for that city.
+                      Only fires when all three cities have a reading available.
+
+        Returns:
+            Cooldown-filtered list of cross-city event dicts.
+        """
+        if len(readings) < 3:
+            return []
+
+        events: list[EventDict] = []
+        result = self._check_cross_city_divergence(readings)
+        if result is None:
+            return []
+
+        now = datetime.now(tz=timezone.utc)
+        key = (result["city"], result["event_type"])
+        last = self._last_fired.get(key)
+        if last is None or (now - last) >= _COOLDOWN:
+            self._last_fired[key] = now
+            _logger.info(
+                "event_fired",
+                city=result["city"],
+                event_type=result["event_type"],
+                timestamp=str(result["timestamp"]),
+                summary=result["summary"],
+            )
+            events.append(result)
+
+        return events
+
+    def _check_cross_city_divergence(
+        self,
+        readings: dict[str, RawReading],
+    ) -> EventDict | None:
+        """Fire when one city's temperature diverges more than 15°C from the other two.
+
+        15°C is chosen because same-day inter-city gaps above this are rare in
+        southern Canada — it implies genuinely different weather systems, not just
+        the normal 5–10°C Ottawa/Vancouver climate difference.
+        """
+        _DIVERGENCE_THRESHOLD = 15.0
+        cities = list(readings.keys())
+        temps = {c: readings[c].temperature for c in cities}
+
+        for city in cities:
+            others = [c for c in cities if c != city]
+            other_avg = sum(temps[c] for c in others) / len(others)
+            divergence = abs(temps[city] - other_avg)
+            if divergence <= _DIVERGENCE_THRESHOLD:
+                continue
+            direction = "warmer" if temps[city] > other_avg else "colder"
+            # Use the outlier city as "city" in the event
+            ref_str = " and ".join(f"{c} ({temps[c]:.1f}°C)" for c in others)
+            return _event(
+                city=city,
+                event_type="cross_city_divergence",
+                timestamp=readings[city].timestamp,
+                summary=f"{city} is {divergence:.0f}°C {direction} than the other monitored cities.",
+                reason=(
+                    f"{city} ({temps[city]:.1f}°C) diverges {divergence:.1f}°C from "
+                    f"the average of {ref_str}, exceeding the 15°C divergence threshold."
+                ),
+                metrics={
+                    "temperature": temps[city],
+                    "other_average": round(other_avg, 2),
+                    "divergence": round(divergence, 2),
+                    "other_cities": {c: temps[c] for c in others},
+                },
+            )
+        return None

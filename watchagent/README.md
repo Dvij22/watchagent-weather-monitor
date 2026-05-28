@@ -129,7 +129,7 @@ Tests use SQLite in-memory with `StaticPool` — no running Postgres required. A
 
 ### Design decisions
 
-The central question is not "what can we detect?" but "what is worth surfacing?" Open-Meteo provides temperature, apparent temperature, precipitation, wind speed, and WMO weather code. From those five fields, dozens of checks are possible. We narrowed to nine using three criteria:
+The central question is not "what can we detect?" but "what is worth surfacing?" Open-Meteo provides temperature, apparent temperature, precipitation, wind speed, and WMO weather code. From those five fields, dozens of checks are possible. We narrowed to ten using three criteria:
 
 1. **Operationally actionable.** An event should tell a person something they can act on — dress differently, avoid driving, prepare for a power outage. A statistically unusual reading that has no practical consequence is noise, not signal.
 
@@ -137,20 +137,24 @@ The central question is not "what can we detect?" but "what is worth surfacing?"
 
 3. **Detectable from available fields without external reference data.** Every check uses only what Open-Meteo provides. We deliberately avoided checks that would require historical climatology databases, forecast data, or cross-API lookups, because those introduce dependencies that break availability.
 
-`feels_like_gap` and `city_anomaly` are the two most deliberate choices. `feels_like_gap` fires when apparent temperature diverges sharply from actual — a condition that is genuinely dangerous (hypothermia risk, heat stress) and invisible to anyone who only checks the temperature number. `city_anomaly` detects readings that are statistically unusual *relative to that city's recent baseline*, which means it self-calibrates: an Ottawa reading of −20 °C is normal in February but anomalous in October, and the detector handles both correctly without hardcoded seasonal rules.
+`feels_like_gap` and `city_anomaly` are the two most deliberate per-city choices. `feels_like_gap` fires when apparent temperature diverges sharply from actual — a condition that is genuinely dangerous (hypothermia risk, heat stress) and invisible to anyone who only checks the temperature number. `city_anomaly` detects readings that are statistically unusual *relative to that city's recent baseline*, which means it self-calibrates: an Ottawa reading of −20 °C is normal in February but anomalous in October, and the detector handles both correctly without hardcoded seasonal rules.
+
+**City-adaptive thresholds.** The `sudden_temp_drop` and `sudden_temp_rise` checks do not use a fixed 5 °C threshold for all cities. When at least 6 historical readings exist, the threshold is `max(5.0, stddev × 2)`, computed from that city's own recent temperature history. Vancouver is a stable oceanic city (typical hourly stddev ~0.5–1 °C); Ottawa is a volatile continental city (stddev ~2–4 °C in transitional seasons). The same absolute change correctly signals more urgency in Vancouver than in Ottawa.
+
+**Cross-city comparison.** After each poll cycle, `detect_cross_city_events` compares the three cities simultaneously. A `cross_city_divergence` event fires when one city's temperature is more than 15 °C away from the average of the other two. This threshold reflects genuine divergence — on any given day Ottawa and Vancouver can differ by 10–12 °C as normal regional climate, but 15 °C+ implies different synoptic weather systems are active simultaneously.
 
 Checks we considered and rejected: UV index (not in the Open-Meteo current-weather fields), humidity (not available in the free tier endpoint we use), and day-over-day comparison (requires 24+ hours of history before it can fire at all, making it useless for a freshly deployed instance).
 
 ### Thresholds and calibration
 
-The `EventDetector` runs all nine checks against every new reading using the previous 24 readings as history. Each check returns `None` or an event dict with six required keys: `city`, `event_type`, `timestamp`, `summary`, `reason`, `metrics`.
+The `EventDetector` runs all ten checks against every new reading using the previous 24 readings as history. Per-city checks return `None` or an event dict with six required keys: `city`, `event_type`, `timestamp`, `summary`, `reason`, `metrics`. The cross-city check runs once per poll cycle after all three cities are processed.
 
 A 3-hour in-memory cooldown per `(city, event_type)` pair prevents re-firing on sustained conditions.
 
 | Event type | Threshold | Why this threshold |
 |---|---|---|
-| `sudden_temp_drop` | > 5 °C drop from previous reading | A 5 °C hourly drop is unusual in Canadian cities but not impossible; lower would fire on normal diurnal transitions |
-| `sudden_temp_rise` | > 5 °C rise from previous reading | Symmetric with drop; chinook events in Ottawa can produce fast rises but rarely exceed 5 °C in a single poll |
+| `sudden_temp_drop` | > `max(5.0, stddev × 2)` drop from previous reading | Adapts to each city's observed variability; a 5 °C floor ensures cold-start sensitivity |
+| `sudden_temp_rise` | > `max(5.0, stddev × 2)` rise from previous reading | Symmetric with drop; chinook and föhn events can produce fast rises in Ottawa |
 | `city_anomaly` | z-score > 2, min 6 readings | 2σ catches the outer 5% of a normal distribution; 6-reading minimum avoids cold-start false positives when stddev is artificially low |
 | `feels_like_gap` | `abs(apparent − actual)` > 8 °C | An 8 °C gap represents operationally dangerous wind chill or humidity; smaller gaps are common and not actionable |
 | `dangerous_wind` | wind speed > 80 km/h | 80 km/h is the Environment Canada threshold for wind warnings; below this, gusts are unpleasant but not dangerous |
@@ -158,6 +162,7 @@ A 3-hour in-memory cooldown per `(city, event_type)` pair prevents re-firing on 
 | `heavy_precipitation` | > 10 mm in one hourly reading | 10 mm/h is the standard meteorological definition of heavy rain; this maps cleanly to the Open-Meteo hourly field |
 | `precip_streak` | 3 consecutive readings > 0.5 mm each | Three consecutive wet readings (15+ minutes of rain) distinguishes sustained precipitation from a single shower spike |
 | `weather_code_severity` | WMO code escalates to a higher tier | Detects transitions between severity tiers (light → heavy rain → heavy snow → thunderstorm) rather than absolute codes, avoiding spam on sustained storms |
+| `cross_city_divergence` | one city > 15 °C from the average of the other two | Ottawa–Vancouver normal difference is 5–12 °C; 15 °C+ implies genuinely different synoptic systems are active simultaneously |
 
 ---
 
@@ -203,8 +208,8 @@ Loads the last N readings per city from the database and re-runs the `EventDetec
 **In-memory cooldown resets on restart.**
 The 3-hour per-`(city, event_type)` cooldown is stored in `EventDetector._last_fired`, which is discarded when the poller restarts. A container restart after a sustained storm will re-fire events that were already suppressed. Persisting the cooldown table to PostgreSQL would fix this but adds write overhead on every poll cycle.
 
-**No cross-city comparison.**
-The current detectors are per-city: each reading is compared only against that city's own history. A "Vancouver is 20 °C warmer than Ottawa" anomaly would not fire. Cross-city comparison requires a different detector architecture and a shared history buffer, which is deferred to a future phase.
+**Cross-city comparison is temperature-only.**
+The `cross_city_divergence` check compares temperatures across all three cities each cycle, but does not currently extend to wind or precipitation. A scenario where Ottawa has a blizzard while Vancouver is clear would not fire a cross-city event — it would fire per-city events (`weather_code_severity`, `heavy_precipitation`) for Ottawa independently.
 
 **Open-Meteo hourly resolution limits sub-hour detection.**
 Open-Meteo updates current conditions on an hourly cadence regardless of poll frequency. Polling every 5 minutes does not increase data resolution — it reduces the risk of missing an update window. Events that require two consecutive *different* readings (sudden drops, wind shifts, severity escalation) can only fire at most once per hour in practice.
