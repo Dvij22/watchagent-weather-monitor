@@ -152,6 +152,47 @@ def test_readings_limit_respected(engine, test_client):
     assert len(resp.json()["readings"]) == 1
 
 
+def test_readings_shape_has_all_stored_fields(engine, test_client):
+    """Every reading object exposes all fields persisted to the database.
+
+    The spec says /readings must return 'all stored fields for each reading'.
+    This test seeds a reading with known values and verifies every column
+    is present and correct in the response body.
+    """
+    _seed(
+        engine,
+        readings=[
+            sample_reading(
+                city="Vancouver",
+                timestamp=_BASE_TS,
+                temperature=-2.5,
+                apparent_temperature=-9.1,
+                precipitation=3.2,
+                wind_speed=45.0,
+                weather_code=71,
+            )
+        ],
+    )
+
+    resp = test_client.get("/readings?city=Vancouver")
+    assert resp.status_code == 200
+    readings = resp.json()["readings"]
+    assert len(readings) == 1
+    r = readings[0]
+
+    # All stored columns must be present
+    assert set(r.keys()) == {"id", "city", "timestamp", "temperature",
+                             "apparent_temperature", "precipitation",
+                             "wind_speed", "weather_code", "created_at"}
+    # Values match what was seeded
+    assert r["city"] == "Vancouver"
+    assert r["temperature"] == pytest.approx(-2.5)
+    assert r["apparent_temperature"] == pytest.approx(-9.1)
+    assert r["precipitation"] == pytest.approx(3.2)
+    assert r["wind_speed"] == pytest.approx(45.0)
+    assert r["weather_code"] == 71
+
+
 # ---------------------------------------------------------------------------
 # /events
 # ---------------------------------------------------------------------------
