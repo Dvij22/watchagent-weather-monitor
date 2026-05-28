@@ -35,4 +35,4 @@ def get_readings(
             .all()
         )
 
-    return {"readings": rows}  # type: ignore[return-value]
+    return {"readings": [ReadingOut.model_validate(r) for r in rows]}

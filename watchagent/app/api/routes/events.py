@@ -23,4 +23,4 @@ def get_events(
     """
     repo = EventRepository(db)
     rows = repo.get_all(city=city, limit=limit)
-    return {"events": rows}  # type: ignore[return-value]
+    return {"events": [EventOut.model_validate(r) for r in rows]}

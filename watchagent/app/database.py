@@ -3,12 +3,13 @@
 from collections.abc import Generator
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
 
 
-def _make_engine():
+def _make_engine() -> Engine:
     """Build the SQLAlchemy engine from the current settings."""
     return create_engine(get_settings().database_url)
 

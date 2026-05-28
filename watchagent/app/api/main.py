@@ -2,6 +2,7 @@
 
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 
 import structlog
 from fastapi import FastAPI, Request, Response
@@ -38,7 +39,10 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ #
 
     @app.middleware("http")
-    async def log_requests(request: Request, call_next: object) -> Response:
+    async def log_requests(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         """Emit a structured INFO log for every HTTP request with timing."""
         request_id = str(uuid.uuid4())
         log = _logger.bind(
@@ -48,7 +52,7 @@ def create_app() -> FastAPI:
         )
         start = time.perf_counter()
         try:
-            response: Response = await call_next(request)  # type: ignore[operator]
+            response: Response = await call_next(request)
         except Exception:
             log.error("request_unhandled_exception", exc_info=True)
             raise

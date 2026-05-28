@@ -1,24 +1,24 @@
 ---
-Every event dict from EventDetector must contain exactly:
-  city (str), event_type (str), timestamp (datetime),
-  summary (str), reason (str), metrics (dict)
+Every event dict produced by EventDetector must contain exactly these keys:
+  city (str), event_type (str), timestamp (datetime), summary (str),
+  reason (str), metrics (dict)
 
-Allowed event_type values (no others):
+event_type must be one of these exact strings (no others):
   sudden_temp_drop, sudden_temp_rise, city_anomaly, feels_like_gap,
   dangerous_wind, wind_shift, heavy_precipitation, precip_streak,
   weather_code_severity
 
-- summary: one human-readable sentence, no technical jargon
-- reason: explains WHY it fired — must include threshold and actual value
-- metrics: must contain the numeric values that triggered the event
+summary is one sentence, human-readable, no jargon.
+reason explains WHY the detector fired — include threshold and actual value.
+metrics must include the numeric values that triggered the event.
 
-Correct example:
+Example of a correct event:
 {
   "city": "Ottawa",
   "event_type": "feels_like_gap",
   "timestamp": "2024-01-15T14:00:00",
-  "summary": "Ottawa feels 11 degrees colder than the actual temperature.",
-  "reason": "Apparent temp (-6C) deviates 11C from actual (5C), exceeding 8C threshold.",
+  "summary": "Ottawa feels 11°C colder than actual temperature.",
+  "reason": "Apparent temperature (-6°C) deviates 11°C from actual (5°C), exceeding the 8°C threshold.",
   "metrics": {"temperature": 5.0, "apparent_temperature": -6.0, "gap": 11.0}
 }
 ---

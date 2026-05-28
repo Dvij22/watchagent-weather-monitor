@@ -13,6 +13,7 @@ from app.repositories.event_repo import EventRepository
 from app.repositories.reading_repo import ReadingRepository
 from app.services.event_detector import EventDetector
 from app.services.weather_client import CITIES, RawReading, WeatherClient
+from sqlalchemy.orm import Session
 
 _logger = structlog.get_logger(__name__).bind(component="poller")
 
@@ -105,17 +106,15 @@ class Poller:
         self,
         reading: RawReading,
         history: list[WeatherReading],
-        db: object,
+        db: Session,
         log: structlog.BoundLogger,  # type: ignore[type-arg]
     ) -> None:
         """Run all event checks and persist any that fired."""
-        from sqlalchemy.orm import Session as _Session
-
         events = self._detector.detect_events(reading, history)
         if not events:
             return
 
-        event_repo = EventRepository(db)  # type: ignore[arg-type]
+        event_repo = EventRepository(db)
         for event_data in events:
             try:
                 event_repo.insert(event_data)
