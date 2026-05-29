@@ -41,13 +41,20 @@ def _make_session() -> "Session":
         print("ERROR: DATABASE_URL is not set.", file=sys.stderr)
         sys.exit(1)
     try:
-        from sqlalchemy import create_engine
+        from sqlalchemy import create_engine, text
         from sqlalchemy.orm import sessionmaker
         engine = create_engine(database_url)
         Session = sessionmaker(bind=engine)
         session = Session()
-        session.execute(__import__("sqlalchemy").text("SELECT 1"))
+        session.execute(text("SELECT 1"))
         return session
+    except ModuleNotFoundError as exc:
+        print(
+            f"ERROR: missing DB driver — {exc}\n"
+            "  Run inside the container: docker compose exec api python .cursor/skills/data_analysis.py",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     except Exception as exc:
         print(f"ERROR: DB connection failed — {exc}", file=sys.stderr)
         sys.exit(1)

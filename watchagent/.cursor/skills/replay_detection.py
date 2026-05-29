@@ -140,7 +140,8 @@ def main() -> None:
                     city_events += 1
 
                 history.append(row)
-                if len(history) > 24:
+                # Keep the same window size used by the live poller (settings.history_limit).
+                if len(history) > args.n:
                     history.pop(0)
 
             if city_events == 0:

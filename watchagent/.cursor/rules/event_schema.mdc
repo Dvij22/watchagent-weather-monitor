@@ -1,24 +1,60 @@
 ---
-Every event dict produced by EventDetector must contain exactly these keys:
-  city (str), event_type (str), timestamp (datetime), summary (str),
-  reason (str), metrics (dict)
+Every event dict produced by EventDetector (app/services/event_detector.py) must
+contain exactly these six keys — no more, no fewer:
 
-event_type must be one of these exact strings (no others):
-  sudden_temp_drop, sudden_temp_rise, city_anomaly, feels_like_gap,
-  dangerous_wind, wind_shift, heavy_precipitation, precip_streak,
-  weather_code_severity, cross_city_divergence
+  city        (str)      — one of: "Ottawa", "Toronto", "Vancouver"
+  event_type  (str)      — one of the ten strings listed below
+  timestamp   (datetime) — timezone-aware UTC datetime from the RawReading
+  summary     (str)      — one human-readable sentence; must include the city name,
+                           the key numeric value, and the unit
+  reason      (str)      — explains WHY it fired; must include the actual measured
+                           value AND the threshold that was crossed
+  metrics     (dict)     — all numeric values referenced in reason; threshold-based
+                           events must include a "threshold" key
 
-summary is one sentence, human-readable, no jargon.
-reason explains WHY the detector fired — include threshold and actual value.
-metrics must include the numeric values that triggered the event.
+ALLOWED event_type VALUES (exactly these ten strings):
+  sudden_temp_drop       — city-adaptive threshold (2× recent stddev, min 5.0°C)
+  sudden_temp_rise       — same adaptive threshold
+  city_anomaly           — z-score > 2.0 against city's own recent baseline
+  feels_like_gap         — apparent vs actual temperature divergence > 8.0°C
+  dangerous_wind         — wind speed > 80.0 km/h (Environment Canada criterion)
+  wind_shift             — single-poll wind speed change > 40.0 km/h
+  heavy_precipitation    — hourly precipitation > 10.0 mm
+  precip_streak          — 3 consecutive readings each > 0.5 mm
+  weather_code_severity  — WMO code escalates to a higher severity tier
+  cross_city_divergence  — one city > 15.0°C from the average of the other two
 
-Example of a correct event:
+METRIC KEYS — required keys per event type:
+  sudden_temp_drop / sudden_temp_rise:
+    previous_temperature, temperature, delta, threshold
+  city_anomaly:
+    temperature, mean, stddev, z_score
+  feels_like_gap:
+    temperature, apparent_temperature, gap
+  dangerous_wind:
+    wind_speed, threshold, excess_over_threshold
+  wind_shift:
+    previous_wind_speed, wind_speed, delta, threshold
+  heavy_precipitation:
+    precipitation, threshold, excess_over_threshold, multiplier
+  precip_streak:
+    streak_length, total_precipitation, readings
+  weather_code_severity:
+    previous_weather_code, weather_code, previous_tier, new_tier
+  cross_city_divergence:
+    temperature, other_average, divergence, other_cities
+
+EXAMPLE of a correctly-formed event:
 {
   "city": "Ottawa",
   "event_type": "feels_like_gap",
-  "timestamp": "2024-01-15T14:00:00",
-  "summary": "Ottawa feels 11°C colder than actual temperature.",
-  "reason": "Apparent temperature (-6°C) deviates 11°C from actual (5°C), exceeding the 8°C threshold.",
+  "timestamp": "2024-01-15T14:00:00+00:00",
+  "summary": "Ottawa feels 11.0°C colder than the thermometer reads: apparent -6.0°C vs actual 5.0°C (wind chill).",
+  "reason": "Apparent temperature (-6.0°C) deviates 11.0°C from actual (5.0°C), exceeding the 8.0°C gap threshold. The gap is driven by wind chill.",
   "metrics": {"temperature": 5.0, "apparent_temperature": -6.0, "gap": 11.0}
 }
+
+NOTE on adaptive thresholds: sudden_temp_drop and sudden_temp_rise use a
+city-adaptive threshold (max(5.0, stddev×2) from recent history). The resolved
+threshold must always appear in metrics["threshold"].
 ---

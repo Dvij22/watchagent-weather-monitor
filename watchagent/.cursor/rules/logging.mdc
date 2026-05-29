@@ -1,15 +1,41 @@
 ---
-When logging in this codebase:
-- Always use structlog, never print() or the stdlib logging module directly
-- Every logger must be bound with at least one context key before use.
-  In the poller: bind city and component="poller".
-  In the API: bind path, method, and request_id.
-- Log level conventions:
-  DEBUG: raw API response bodies
-  INFO: successful poll stored, event fired, API request completed
-  WARNING: poll failed after retries (include city, status_code, attempt_count)
-  ERROR: DB connection failure, unexpected exception in event detector
-- Never log at ERROR for expected business conditions (duplicate reading = INFO)
-- Every WARNING log for a failed poll must include these exact fields:
-  city (str), http_status (int or None), attempt_count (int), error_msg (str)
+When logging in this codebase (WatchAgent — app/services/, app/api/, app/repositories/):
+
+LOGGER SETUP
+- Always use structlog.get_logger(__name__) at module level. Never use print() or
+  stdlib logging.info/warning/error directly in application code.
+- stdlib logging.basicConfig() in poller_main.py is intentional — it wires
+  third-party libraries into the structured pipeline. Do not remove it.
+
+CONTEXT BINDING — bind before logging, not at the log call:
+  - In app/services/poller.py:        bind(city=city, component="poller")
+  - In app/services/weather_client.py: bind(city=city, component="weather_client")
+  - In app/api/main.py middleware:     bind(request_id=uuid, method=method, path=path)
+  - In app/repositories/:              no binding needed (caller provides context)
+
+LOG LEVELS — use these exact levels for these exact conditions:
+  DEBUG:   raw Open-Meteo API response body (event key: "api_response_raw",
+           field: body=response.text)
+  INFO:    reading inserted successfully (event key: "reading_stored",
+           fields: city, timestamp, duplicate=False)
+           reading skipped as duplicate (event key: "reading_skipped",
+           fields: city, timestamp, duplicate=True)
+           event fired and persisted (event key: "event_fired",
+           fields: city, event_type, timestamp, summary)
+           API request completed (event key: "request_completed",
+           fields: status_code, duration_ms)
+           DB tables created (event key: "db_init_complete")
+  WARNING: Open-Meteo poll failed after all retries (event key: "poll_failed",
+           fields: city (str), http_status (int|None), attempt_count (int),
+           error_msg (str)). This is the ONLY warning type in the hot path.
+  ERROR:   Unexpected exception in _handle_reading, event persistence, or DB init
+           (event key: "reading_handle_failed", "event_persist_failed",
+           "db_init_failed"). ALL ERROR logs must include exc_info=True.
+
+RULES:
+- Duplicate readings (IntegrityError) are INFO with duplicate=True, never WARNING or ERROR.
+- poll_failed must always carry all four fields: city, http_status, attempt_count, error_msg.
+  http_status is None when the failure is not an HTTP status error (timeout, DNS, etc.).
+- Every ERROR log must include exc_info=True so the stack trace is captured.
+- Never log sensitive data (database credentials, API keys) at any level.
 ---
