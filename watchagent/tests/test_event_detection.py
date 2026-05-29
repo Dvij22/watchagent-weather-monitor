@@ -96,6 +96,12 @@ def test_sudden_temp_rise_no_fire():
     assert "sudden_temp_rise" not in _event_types(events)
 
 
+def test_sudden_temp_rise_no_history():
+    """Cold-start guard: no history → cannot compute a delta, must not fire."""
+    events = _detect(sample_reading(temperature=12.0), [])
+    assert "sudden_temp_rise" not in _event_types(events)
+
+
 # ---------------------------------------------------------------------------
 # city_anomaly
 # ---------------------------------------------------------------------------

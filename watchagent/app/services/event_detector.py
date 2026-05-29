@@ -495,7 +495,6 @@ class EventDetector:
         if len(readings) < 3:
             return []
 
-        events: list[EventDict] = []
         result = self._check_cross_city_divergence(readings)
         if result is None:
             return []
@@ -503,18 +502,18 @@ class EventDetector:
         now = datetime.now(tz=timezone.utc)
         key = (result["city"], result["event_type"])
         last = self._last_fired.get(key)
-        if last is None or (now - last) >= _COOLDOWN:
-            self._last_fired[key] = now
-            _logger.info(
-                "event_fired",
-                city=result["city"],
-                event_type=result["event_type"],
-                timestamp=str(result["timestamp"]),
-                summary=result["summary"],
-            )
-            events.append(result)
+        if last is not None and (now - last) < _COOLDOWN:
+            return []
 
-        return events
+        self._last_fired[key] = now
+        _logger.info(
+            "event_fired",
+            city=result["city"],
+            event_type=result["event_type"],
+            timestamp=str(result["timestamp"]),
+            summary=result["summary"],
+        )
+        return [result]
 
     def _check_cross_city_divergence(
         self,

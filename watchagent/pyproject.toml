@@ -33,6 +33,9 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# ResourceWarning from SQLAlchemy/tenacity connection-pool threads are
+# third-party internals, not application bugs.  Suppress to keep CI output clean.
+filterwarnings = ["ignore::ResourceWarning"]
 
 [tool.coverage.run]
 source = ["app"]

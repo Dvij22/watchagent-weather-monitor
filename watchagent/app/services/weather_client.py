@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -94,7 +94,7 @@ class WeatherClient:
                 "longitude": coords["lon"],
                 "current": _CURRENT_FIELDS,
                 "wind_speed_unit": "kmh",
-                "timezone": "auto",
+                "timezone": "UTC",
             }
             if self._client is not None:
                 response = await self._client.get(_BASE_URL, params=params)
@@ -133,7 +133,7 @@ class WeatherClient:
             )
             return None
 
-        timestamp = datetime.fromisoformat(current["time"])
+        timestamp = datetime.fromisoformat(current["time"]).replace(tzinfo=timezone.utc)
 
         return RawReading(
             city=city,

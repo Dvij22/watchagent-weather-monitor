@@ -83,8 +83,16 @@ class Poller:
         db = SessionLocal()
         try:
             reading_repo = ReadingRepository(db)
-            row = reading_repo.insert(reading)
 
+            # Fetch history BEFORE inserting so that history[0] is the previous
+            # reading, not the current one.  If fetched after insert, delta-based
+            # checks (sudden_temp_drop/rise, wind_shift, weather_code_severity)
+            # would compare the current reading against itself and never fire.
+            history = reading_repo.get_recent(
+                reading.city, limit=get_settings().history_limit
+            )
+
+            row = reading_repo.insert(reading)
             is_duplicate = row is None
             log.info(
                 "reading_stored",
@@ -96,9 +104,6 @@ class Poller:
             if is_duplicate:
                 return False
 
-            history = reading_repo.get_recent(
-                reading.city, limit=get_settings().history_limit
-            )
             await self._run_event_detection(reading, history, db, log)
             return True
 

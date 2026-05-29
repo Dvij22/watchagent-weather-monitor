@@ -4,7 +4,7 @@ No real network request is made in this file.  The WeatherClient constructor
 accepts an optional httpx.AsyncClient for exactly this purpose.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -57,6 +57,7 @@ async def test_fetch_returns_raw_reading_on_success():
     assert result.wind_speed == 32.4
     assert result.weather_code == 61
     assert isinstance(result.timestamp, datetime)
+    assert result.timestamp.tzinfo == timezone.utc  # must be UTC-aware, not naive
 
 
 @pytest.mark.asyncio
