@@ -59,6 +59,23 @@ _PRECIP_STREAK_MIN_MM = 0.5
 # are rare in southern Canada and imply genuinely different weather systems.
 _CROSS_CITY_DIVERGENCE_THRESHOLD = 15.0
 
+# Minimum recent readings required before city_anomaly can fire.
+# Fewer than 6 points yields an unreliable standard deviation estimate.
+_CITY_ANOMALY_MIN_HISTORY = 6
+
+# Z-score above which a temperature reading is classified as a city anomaly.
+# |z| > 2 captures roughly the outer 5% of a normal distribution.
+_CITY_ANOMALY_Z_THRESHOLD = 2.0
+
+# Apparent temperature gap (°C) above which feels_like_gap fires.
+# 8°C is a meaningful discomfort threshold: wind chill or heat index at this
+# level produces a distinctly different felt experience from the thermometer.
+_FEELS_LIKE_GAP_THRESHOLD = 8.0
+
+# Number of consecutive readings (including the current one) that must all
+# exceed _PRECIP_STREAK_MIN_MM before precip_streak fires.
+_PRECIP_STREAK_LENGTH = 3
+
 # WMO code severity tiers
 _SEVERITY_TIER: dict[str, int] = {
     "thunderstorm": 95,
@@ -68,6 +85,7 @@ _SEVERITY_TIER: dict[str, int] = {
 }
 
 def _wmo_tier(code: int) -> str:
+    """Map a WMO weather code to one of four named severity tiers."""
     if code >= 95:
         return "thunderstorm"
     if code >= 75:
@@ -191,12 +209,22 @@ class EventDetector:
             city=new.city,
             event_type="sudden_temp_drop",
             timestamp=new.timestamp,
-            summary=f"{new.city} temperature dropped {delta:.1f}°C in one reading.",
-            reason=(
-                f"Temperature fell from {prev_temp:.1f}°C to {new.temperature:.1f}°C "
-                f"(drop of {delta:.1f}°C), exceeding the city-adaptive threshold of {threshold:.1f}°C."
+            summary=(
+                f"{new.city} dropped {delta:.1f}°C in a single poll — "
+                f"from {prev_temp:.1f}°C down to {new.temperature:.1f}°C."
             ),
-            metrics={"previous_temperature": prev_temp, "temperature": new.temperature, "delta": round(delta, 2), "threshold": round(threshold, 2)},
+            reason=(
+                f"Temperature fell {delta:.1f}°C in one reading "
+                f"(from {prev_temp:.1f}°C to {new.temperature:.1f}°C), "
+                f"exceeding the city-adaptive threshold of {threshold:.1f}°C "
+                f"(2× recent temperature standard deviation, floored at {_MIN_TEMP_DELTA}°C)."
+            ),
+            metrics={
+                "previous_temperature": prev_temp,
+                "temperature": new.temperature,
+                "delta": round(delta, 2),
+                "threshold": round(threshold, 2),
+            },
         )
 
     def _check_sudden_temp_rise(
@@ -213,18 +241,28 @@ class EventDetector:
             city=new.city,
             event_type="sudden_temp_rise",
             timestamp=new.timestamp,
-            summary=f"{new.city} temperature rose {delta:.1f}°C in one reading.",
-            reason=(
-                f"Temperature rose from {prev_temp:.1f}°C to {new.temperature:.1f}°C "
-                f"(rise of {delta:.1f}°C), exceeding the city-adaptive threshold of {threshold:.1f}°C."
+            summary=(
+                f"{new.city} surged {delta:.1f}°C in a single poll — "
+                f"from {prev_temp:.1f}°C up to {new.temperature:.1f}°C."
             ),
-            metrics={"previous_temperature": prev_temp, "temperature": new.temperature, "delta": round(delta, 2), "threshold": round(threshold, 2)},
+            reason=(
+                f"Temperature rose {delta:.1f}°C in one reading "
+                f"(from {prev_temp:.1f}°C to {new.temperature:.1f}°C), "
+                f"exceeding the city-adaptive threshold of {threshold:.1f}°C "
+                f"(2× recent temperature standard deviation, floored at {_MIN_TEMP_DELTA}°C)."
+            ),
+            metrics={
+                "previous_temperature": prev_temp,
+                "temperature": new.temperature,
+                "delta": round(delta, 2),
+                "threshold": round(threshold, 2),
+            },
         )
 
     def _check_city_anomaly(
         self, new: RawReading, history: list[WeatherReading]
     ) -> EventDict | None:
-        if len(history) < 6:
+        if len(history) < _CITY_ANOMALY_MIN_HISTORY:
             return None
         temps = [r.temperature for r in history]
         mean = statistics.mean(temps)
@@ -232,39 +270,57 @@ class EventDetector:
         if stddev == 0:
             return None
         z = (new.temperature - mean) / stddev
-        if abs(z) <= 2.0:
+        if abs(z) <= _CITY_ANOMALY_Z_THRESHOLD:
             return None
         direction = "above" if z > 0 else "below"
         return _event(
             city=new.city,
             event_type="city_anomaly",
             timestamp=new.timestamp,
-            summary=f"{new.city} temperature is unusually {direction} its recent average.",
-            reason=(
-                f"Temperature {new.temperature:.1f}°C is {abs(z):.2f} standard deviations "
-                f"{direction} the {len(history)}-reading mean of {mean:.1f}°C "
-                f"(stddev {stddev:.2f}°C), exceeding the 2σ threshold."
+            summary=(
+                f"{new.city} temperature ({new.temperature:.1f}°C) is {abs(z):.1f}σ {direction} "
+                f"its {len(history)}-reading baseline — statistically anomalous for this city."
             ),
-            metrics={"temperature": new.temperature, "mean": round(mean, 2), "stddev": round(stddev, 2), "z_score": round(z, 2)},
+            reason=(
+                f"Current temperature ({new.temperature:.1f}°C) is {abs(z):.2f}σ {direction} "
+                f"the {len(history)}-reading mean ({mean:.1f}°C, σ={stddev:.2f}°C), "
+                f"exceeding the {_CITY_ANOMALY_Z_THRESHOLD:.1f}σ anomaly threshold."
+            ),
+            metrics={
+                "temperature": new.temperature,
+                "mean": round(mean, 2),
+                "stddev": round(stddev, 2),
+                "z_score": round(z, 2),
+            },
         )
 
     def _check_feels_like_gap(
         self, new: RawReading, history: list[WeatherReading]  # history unused — pure single-reading check
     ) -> EventDict | None:
         gap = abs(new.apparent_temperature - new.temperature)
-        if gap <= 8.0:
+        if gap <= _FEELS_LIKE_GAP_THRESHOLD:
             return None
         direction = "colder" if new.apparent_temperature < new.temperature else "warmer"
+        cause = "wind chill" if new.apparent_temperature < new.temperature else "heat and humidity"
         return _event(
             city=new.city,
             event_type="feels_like_gap",
             timestamp=new.timestamp,
-            summary=f"{new.city} feels {gap:.0f}°C {direction} than the actual temperature.",
-            reason=(
-                f"Apparent temp ({new.apparent_temperature:.1f}°C) deviates {gap:.1f}°C "
-                f"from actual ({new.temperature:.1f}°C), exceeding the 8°C threshold."
+            summary=(
+                f"{new.city} feels {gap:.1f}°C {direction} than the thermometer reads: "
+                f"apparent {new.apparent_temperature:.1f}°C vs actual {new.temperature:.1f}°C ({cause})."
             ),
-            metrics={"temperature": new.temperature, "apparent_temperature": new.apparent_temperature, "gap": round(gap, 2)},
+            reason=(
+                f"Apparent temperature ({new.apparent_temperature:.1f}°C) deviates {gap:.1f}°C "
+                f"from actual ({new.temperature:.1f}°C), exceeding the "
+                f"{_FEELS_LIKE_GAP_THRESHOLD:.1f}°C gap threshold. "
+                f"The gap is driven by {cause}."
+            ),
+            metrics={
+                "temperature": new.temperature,
+                "apparent_temperature": new.apparent_temperature,
+                "gap": round(gap, 2),
+            },
         )
 
     def _check_dangerous_wind(
@@ -272,15 +328,26 @@ class EventDetector:
     ) -> EventDict | None:
         if new.wind_speed <= _DANGEROUS_WIND_KMH:
             return None
+        excess = round(new.wind_speed - _DANGEROUS_WIND_KMH, 1)
         return _event(
             city=new.city,
             event_type="dangerous_wind",
             timestamp=new.timestamp,
-            summary=f"{new.city} is experiencing dangerous wind speeds of {new.wind_speed:.0f} km/h.",
-            reason=(
-                f"Wind speed {new.wind_speed:.1f} km/h exceeds the {_DANGEROUS_WIND_KMH:.0f} km/h danger threshold."
+            summary=(
+                f"{new.city} wind reached {new.wind_speed:.0f} km/h — "
+                f"{excess:.0f} km/h above the {_DANGEROUS_WIND_KMH:.0f} km/h "
+                f"Environment Canada warning threshold."
             ),
-            metrics={"wind_speed": new.wind_speed, "threshold": _DANGEROUS_WIND_KMH},
+            reason=(
+                f"Recorded wind speed of {new.wind_speed:.1f} km/h exceeds the "
+                f"{_DANGEROUS_WIND_KMH:.0f} km/h danger threshold "
+                f"(Environment Canada wind warning criterion) by {excess:.1f} km/h."
+            ),
+            metrics={
+                "wind_speed": new.wind_speed,
+                "threshold": _DANGEROUS_WIND_KMH,
+                "excess_over_threshold": excess,
+            },
         )
 
     def _check_wind_shift(
@@ -293,16 +360,27 @@ class EventDetector:
         delta = abs(new.wind_speed - prev_wind)
         if delta <= _WIND_SHIFT_DELTA_KMH:
             return None
+        shift_verb = "surged" if new.wind_speed > prev_wind else "dropped"
         return _event(
             city=new.city,
             event_type="wind_shift",
             timestamp=new.timestamp,
-            summary=f"{new.city} wind speed changed sharply by {delta:.0f} km/h.",
-            reason=(
-                f"Wind shifted from {prev_wind:.1f} km/h to {new.wind_speed:.1f} km/h "
-                f"(change of {delta:.1f} km/h), exceeding the {_WIND_SHIFT_DELTA_KMH:.0f} km/h threshold."
+            summary=(
+                f"{new.city} wind {shift_verb} {delta:.0f} km/h between readings — "
+                f"from {prev_wind:.0f} to {new.wind_speed:.0f} km/h."
             ),
-            metrics={"previous_wind_speed": prev_wind, "wind_speed": new.wind_speed, "delta": round(delta, 1), "threshold": _WIND_SHIFT_DELTA_KMH},
+            reason=(
+                f"Wind speed changed from {prev_wind:.1f} km/h to {new.wind_speed:.1f} km/h "
+                f"in a single poll interval (change of {delta:.1f} km/h), exceeding the "
+                f"{_WIND_SHIFT_DELTA_KMH:.0f} km/h rapid-shift threshold. "
+                f"Both sudden gusts and sudden calms can indicate frontal passage."
+            ),
+            metrics={
+                "previous_wind_speed": prev_wind,
+                "wind_speed": new.wind_speed,
+                "delta": round(delta, 1),
+                "threshold": _WIND_SHIFT_DELTA_KMH,
+            },
         )
 
     def _check_heavy_precipitation(
@@ -310,24 +388,37 @@ class EventDetector:
     ) -> EventDict | None:
         if new.precipitation <= _HEAVY_PRECIP_MM:
             return None
+        multiplier = round(new.precipitation / _HEAVY_PRECIP_MM, 1)
+        excess = round(new.precipitation - _HEAVY_PRECIP_MM, 1)
         return _event(
             city=new.city,
             event_type="heavy_precipitation",
             timestamp=new.timestamp,
-            summary=f"{new.city} recorded {new.precipitation:.1f} mm of precipitation in one hour.",
-            reason=(
-                f"Precipitation {new.precipitation:.1f} mm exceeds the {_HEAVY_PRECIP_MM:.0f} mm/h heavy threshold."
+            summary=(
+                f"{new.city} recorded {new.precipitation:.1f} mm in one hour — "
+                f"{multiplier:.1f}× the {_HEAVY_PRECIP_MM:.0f} mm/h heavy precipitation threshold."
             ),
-            metrics={"precipitation": new.precipitation, "threshold": _HEAVY_PRECIP_MM},
+            reason=(
+                f"Hourly precipitation of {new.precipitation:.1f} mm exceeds the "
+                f"{_HEAVY_PRECIP_MM:.0f} mm/h heavy precipitation threshold by {excess:.1f} mm."
+            ),
+            metrics={
+                "precipitation": new.precipitation,
+                "threshold": _HEAVY_PRECIP_MM,
+                "excess_over_threshold": excess,
+                "multiplier": multiplier,
+            },
         )
 
     def _check_precip_streak(
         self, new: RawReading, history: list[WeatherReading]
     ) -> EventDict | None:
-        # Need the two most recent prior readings plus the new one to form a streak of 3.
-        if len(history) < 2:
+        # Require _PRECIP_STREAK_LENGTH - 1 prior readings plus the current one.
+        if len(history) < _PRECIP_STREAK_LENGTH - 1:
             return None
-        streak = [new.precipitation] + [r.precipitation for r in history[:2]]
+        streak = [new.precipitation] + [
+            r.precipitation for r in history[: _PRECIP_STREAK_LENGTH - 1]
+        ]
         if not all(p > _PRECIP_STREAK_MIN_MM for p in streak):
             return None
         total = round(sum(streak), 2)
@@ -335,13 +426,21 @@ class EventDetector:
             city=new.city,
             event_type="precip_streak",
             timestamp=new.timestamp,
-            summary=f"{new.city} has had continuous precipitation across the last 3 readings.",
-            reason=(
-                f"All 3 consecutive readings exceeded {_PRECIP_STREAK_MIN_MM} mm (values: "
-                f"{streak[2]:.1f}, {streak[1]:.1f}, {streak[0]:.1f} mm). "
-                f"Total accumulated: {total:.2f} mm."
+            summary=(
+                f"{new.city} has measured precipitation in each of the last "
+                f"{_PRECIP_STREAK_LENGTH} consecutive readings — {total:.2f} mm accumulated."
             ),
-            metrics={"streak_length": 3, "total_precipitation": total, "readings": streak},
+            reason=(
+                f"{_PRECIP_STREAK_LENGTH} consecutive readings all exceeded the "
+                f"{_PRECIP_STREAK_MIN_MM} mm trace-precipitation threshold: "
+                f"{streak[2]:.1f} mm \u2192 {streak[1]:.1f} mm \u2192 {streak[0]:.1f} mm "
+                f"(oldest to newest). Total accumulated: {total:.2f} mm."
+            ),
+            metrics={
+                "streak_length": _PRECIP_STREAK_LENGTH,
+                "total_precipitation": total,
+                "readings": streak,
+            },
         )
 
     def _check_weather_code_severity(
@@ -357,10 +456,16 @@ class EventDetector:
             city=new.city,
             event_type="weather_code_severity",
             timestamp=new.timestamp,
-            summary=f"{new.city} weather has escalated to {new_tier.replace('_', ' ')} conditions.",
+            summary=(
+                f"{new.city} conditions escalated from {prev_tier.replace('_', ' ')} "
+                f"to {new_tier.replace('_', ' ')} — "
+                f"WMO code moved from {history[0].weather_code} to {new.weather_code}."
+            ),
             reason=(
-                f"WMO code changed from {history[0].weather_code} ({prev_tier}) "
-                f"to {new.weather_code} ({new_tier}), crossing into a higher severity tier."
+                f"WMO weather code escalated from {history[0].weather_code} "
+                f"({prev_tier.replace('_', ' ')}) to {new.weather_code} "
+                f"({new_tier.replace('_', ' ')}), crossing into a higher severity tier. "
+                f"Tier order (ascending): light \u2192 heavy rain \u2192 heavy snow \u2192 thunderstorm."
             ),
             metrics={
                 "previous_weather_code": history[0].weather_code,
@@ -432,10 +537,16 @@ class EventDetector:
                 city=city,
                 event_type="cross_city_divergence",
                 timestamp=readings[city].timestamp,
-                summary=f"{city} is {divergence:.0f}°C {direction} than the other monitored cities.",
+                summary=(
+                    f"{city} ({temps[city]:.1f}°C) is {divergence:.1f}°C {direction} than the "
+                    f"{other_avg:.1f}°C average of the other monitored cities — "
+                    f"a distinct weather system is likely."
+                ),
                 reason=(
-                    f"{city} ({temps[city]:.1f}°C) diverges {divergence:.1f}°C from "
-                    f"the average of {ref_str}, exceeding the {_CROSS_CITY_DIVERGENCE_THRESHOLD:.0f}°C divergence threshold."
+                    f"{city} temperature ({temps[city]:.1f}°C) diverges {divergence:.1f}°C from "
+                    f"the mean of {ref_str} (average {other_avg:.1f}°C), exceeding the "
+                    f"{_CROSS_CITY_DIVERGENCE_THRESHOLD:.0f}°C inter-city divergence threshold. "
+                    f"Gaps this large across southern Canada indicate genuinely separate weather systems."
                 ),
                 metrics={
                     "temperature": temps[city],

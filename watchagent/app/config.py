@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     poll_interval_seconds: int = 300
     log_level: str = "INFO"
 
+    # How many recent readings to load per city for event detection context.
+    history_limit: int = 24
+
+    # Maximum number of times to retry a failed Open-Meteo HTTP call.
+    weather_api_retry_attempts: int = 3
+
+    # Seconds to wait between Open-Meteo retry attempts.
+    weather_api_retry_wait_seconds: int = 2
+
 
 @lru_cache
 def get_settings() -> Settings:

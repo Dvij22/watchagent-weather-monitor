@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 
 import structlog
+import structlog.stdlib
+from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -13,7 +15,6 @@ from app.repositories.event_repo import EventRepository
 from app.repositories.reading_repo import ReadingRepository
 from app.services.event_detector import EventDetector
 from app.services.weather_client import CITIES, RawReading, WeatherClient
-from sqlalchemy.orm import Session
 
 _logger = structlog.get_logger(__name__).bind(component="poller")
 
@@ -48,7 +49,7 @@ class Poller:
             log.info("poller_sleeping", interval_seconds=interval)
             await asyncio.sleep(interval)
 
-    async def _poll_cycle(self, log: structlog.BoundLogger) -> None:  # type: ignore[type-arg]
+    async def _poll_cycle(self, log: structlog.stdlib.BoundLogger) -> None:
         """Fetch all cities concurrently, persist each result, then run cross-city checks."""
         cities = list(CITIES)
         results: list[RawReading | None] = list(
@@ -73,7 +74,7 @@ class Poller:
     async def _handle_reading(
         self,
         reading: RawReading,
-        log: structlog.BoundLogger,  # type: ignore[type-arg]
+        log: structlog.stdlib.BoundLogger,
     ) -> bool:
         """Insert a reading and trigger per-city event detection.
 
@@ -95,7 +96,9 @@ class Poller:
             if is_duplicate:
                 return False
 
-            history = reading_repo.get_recent(reading.city, limit=24)
+            history = reading_repo.get_recent(
+                reading.city, limit=get_settings().history_limit
+            )
             await self._run_event_detection(reading, history, db, log)
             return True
 
@@ -116,7 +119,7 @@ class Poller:
         reading: RawReading,
         history: list[WeatherReading],
         db: Session,
-        log: structlog.BoundLogger,  # type: ignore[type-arg]
+        log: structlog.stdlib.BoundLogger,
     ) -> None:
         """Run all per-city event checks and persist any that fired."""
         events = self._detector.detect_events(reading, history)
@@ -139,7 +142,7 @@ class Poller:
     async def _run_cross_city_detection(
         self,
         readings: dict[str, RawReading],
-        log: structlog.BoundLogger,  # type: ignore[type-arg]
+        log: structlog.stdlib.BoundLogger,
     ) -> None:
         """Run cross-city comparison checks and persist any events that fired."""
         events = self._detector.detect_cross_city_events(readings)

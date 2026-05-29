@@ -10,6 +10,8 @@ import httpx
 import structlog
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
+from app.config import get_settings
+
 CITIES: dict[str, dict[str, float]] = {
     "Ottawa":    {"lat": 45.42, "lon": -75.69},
     "Toronto":   {"lat": 43.70, "lon": -79.42},
@@ -44,9 +46,10 @@ class RawReading:
 class WeatherClient:
     """Async client that fetches current weather for the three monitored cities.
 
-    Each fetch is retried up to 3 times on any httpx.HTTPError with a 2-second
-    wait between attempts. On final failure the method logs a WARNING and
-    returns None rather than propagating the exception.
+    Each fetch is retried on httpx.HTTPError up to WEATHER_API_RETRY_ATTEMPTS
+    times with WEATHER_API_RETRY_WAIT_SECONDS between attempts (both from
+    settings). On final failure the method logs a WARNING and returns None
+    rather than propagating the exception.
     """
 
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
@@ -75,10 +78,12 @@ class WeatherClient:
 
         attempt_count = 0
 
+        settings = get_settings()
+
         @retry(
             retry=retry_if_exception_type(httpx.HTTPError),
-            stop=stop_after_attempt(3),
-            wait=wait_fixed(2),
+            stop=stop_after_attempt(settings.weather_api_retry_attempts),
+            wait=wait_fixed(settings.weather_api_retry_wait_seconds),
             reraise=True,
         )
         async def _fetch_with_retry() -> dict[str, Any]:

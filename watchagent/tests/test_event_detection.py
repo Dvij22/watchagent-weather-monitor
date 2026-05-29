@@ -1,8 +1,12 @@
-"""Tests for all nine EventDetector checks.
+"""Tests for all EventDetector checks (nine per-city + one cross-city).
 
-Each event type gets a "fires" test with a value that clearly crosses the
-threshold and a "no fire" or "guard" test with a value just below it.
-This is the dual-assertion pattern required by the event_detection_reviewer agent.
+Each per-city event type gets:
+  - A "fires" test: value clearly crosses the threshold.
+  - A "no-fire" test: value just below the threshold (or a cold-start guard).
+  - A cooldown test: same condition on back-to-back calls — second is suppressed.
+
+The dual-assertion (fire + no-fire) and cooldown pattern is required by the
+event_detection_reviewer agent.
 
 EventDetector and WeatherReading are instantiated directly — no DB is needed
 because the detector is a pure function of its inputs.
@@ -14,6 +18,7 @@ import pytest
 
 from app.models.reading import WeatherReading
 from app.services.event_detector import EventDetector
+from app.services.weather_client import RawReading
 from tests.conftest import sample_reading
 
 _TS = datetime(2024, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
@@ -386,3 +391,127 @@ def test_event_schema_has_all_required_keys():
     assert events, "expected at least one event to fire"
     for event in events:
         assert set(event.keys()) >= required, f"Missing keys in: {event}"
+
+
+# ---------------------------------------------------------------------------
+# WMO tier coverage — thunderstorm and heavy_snow escalation paths
+# These cover the two _wmo_tier branches that no earlier test reached.
+# ---------------------------------------------------------------------------
+
+def test_weather_code_escalation_to_heavy_snow():
+    """Escalation from light (0) to heavy snow (75) fires and records new_tier='heavy_snow'."""
+    history = [_history_reading(weather_code=0)]
+    events = _detect(sample_reading(weather_code=75), history)
+    assert "weather_code_severity" in _event_types(events)
+    event = next(e for e in events if e["event_type"] == "weather_code_severity")
+    assert event["metrics"]["new_tier"] == "heavy_snow"
+
+
+def test_weather_code_escalation_to_thunderstorm():
+    """Escalation from light (0) to thunderstorm (95) fires and records new_tier='thunderstorm'."""
+    history = [_history_reading(weather_code=0)]
+    events = _detect(sample_reading(weather_code=95), history)
+    assert "weather_code_severity" in _event_types(events)
+    event = next(e for e in events if e["event_type"] == "weather_code_severity")
+    assert event["metrics"]["new_tier"] == "thunderstorm"
+
+
+def test_weather_code_escalation_heavy_rain_to_heavy_snow():
+    """Escalation from heavy rain (65) to heavy snow (75) is a tier upgrade."""
+    history = [_history_reading(weather_code=65)]
+    events = _detect(sample_reading(weather_code=75), history)
+    assert "weather_code_severity" in _event_types(events)
+    event = next(e for e in events if e["event_type"] == "weather_code_severity")
+    assert event["metrics"]["previous_tier"] == "heavy_rain"
+    assert event["metrics"]["new_tier"] == "heavy_snow"
+
+
+# ---------------------------------------------------------------------------
+# Per-event-type cooldown — parametrized over all 9 per-city event types
+# ---------------------------------------------------------------------------
+
+def _make_triggering_reading(event_type: str) -> tuple[RawReading, list[WeatherReading]]:
+    """Return (reading, history) guaranteed to fire the named event type.
+
+    Each case is crafted to produce a clearly above-threshold reading.
+    apparent_temperature is set to match temperature unless the test specifically
+    requires a gap, to avoid co-firing feels_like_gap in unrelated cases.
+    """
+    if event_type == "sudden_temp_drop":
+        # 7°C drop: prev=15, new=8 — clears the 5°C adaptive floor
+        return (
+            sample_reading(temperature=8.0, apparent_temperature=8.0),
+            [_history_reading(temperature=15.0)],
+        )
+    if event_type == "sudden_temp_rise":
+        # 7°C rise: prev=5, new=12
+        return (
+            sample_reading(temperature=12.0, apparent_temperature=12.0),
+            [_history_reading(temperature=5.0)],
+        )
+    if event_type == "city_anomaly":
+        # 35°C against a ~20°C baseline (stddev ≈ 0.1°C) → z >> 2
+        history = [
+            _history_reading(temperature=t)
+            for t in [20.0, 19.9, 20.1, 20.0, 19.8, 20.2, 20.0, 19.9, 20.1, 20.0]
+        ]
+        # apparent=temperature avoids feels_like_gap; sudden_temp_rise also fires
+        # here but does not affect the city_anomaly cooldown assertion.
+        return sample_reading(temperature=35.0, apparent_temperature=35.0), history
+    if event_type == "feels_like_gap":
+        # 11°C wind-chill gap: temp=5, apparent=-6
+        return sample_reading(temperature=5.0, apparent_temperature=-6.0), []
+    if event_type == "dangerous_wind":
+        # 90 km/h exceeds 80 km/h threshold; default apparent=5 == temperature=5
+        return sample_reading(wind_speed=90.0), []
+    if event_type == "wind_shift":
+        # 50 km/h jump: prev=10, new=60
+        return (
+            sample_reading(wind_speed=60.0),
+            [_history_reading(wind_speed=10.0)],
+        )
+    if event_type == "heavy_precipitation":
+        # 15 mm exceeds 10 mm/h threshold
+        return sample_reading(precipitation=15.0), []
+    if event_type == "precip_streak":
+        # Three readings all above 0.5 mm
+        history = [
+            _history_reading(precipitation=2.0),
+            _history_reading(precipitation=2.0),
+        ]
+        return sample_reading(precipitation=2.0), history
+    if event_type == "weather_code_severity":
+        # Escalation from light (0) to heavy rain (65)
+        return sample_reading(weather_code=65), [_history_reading(weather_code=0)]
+    raise ValueError(f"unknown event_type: {event_type!r}")
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "sudden_temp_drop",
+        "sudden_temp_rise",
+        "city_anomaly",
+        "feels_like_gap",
+        "dangerous_wind",
+        "wind_shift",
+        "heavy_precipitation",
+        "precip_streak",
+        "weather_code_severity",
+    ],
+)
+def test_cooldown_suppresses_repeat_for_all_event_types(event_type: str) -> None:
+    """The 3-hour in-memory cooldown blocks the same (city, event_type) pair from
+    firing on back-to-back calls, verified for every per-city event type."""
+    detector = EventDetector()
+    reading, history = _make_triggering_reading(event_type)
+
+    first = detector.detect_events(reading, history)
+    assert event_type in {e["event_type"] for e in first}, (
+        f"{event_type!r} did not fire on the first call — check _make_triggering_reading"
+    )
+
+    second = detector.detect_events(reading, history)
+    assert event_type not in {e["event_type"] for e in second}, (
+        f"{event_type!r} was not suppressed by the 3-hour cooldown on the second call"
+    )

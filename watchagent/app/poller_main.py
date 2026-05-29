@@ -48,6 +48,7 @@ def _create_tables() -> None:
 
 
 async def _main() -> None:
+    """Configure logging, initialise the database, and run the poller forever."""
     _configure_structlog()
     log = structlog.get_logger(__name__).bind(component="poller_main")
 
