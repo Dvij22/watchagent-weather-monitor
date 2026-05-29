@@ -7,13 +7,15 @@ reading and the ordered history (newest-first). Methods return either an event
 dict matching the event_schema rule exactly, or None. They are pure functions of
 their inputs — no side effects, no I/O.
 
-The public ``detect_events`` method orchestrates all nine checks, applies a
-per-(city, event_type) 3-hour in-memory cooldown to suppress spam on sustained
-conditions, logs every fired event at INFO, and returns the filtered list.
+Two public detection paths:
+  - ``detect_events``        — nine per-city checks, called once per reading.
+  - ``detect_cross_city_events`` — one cross-city check, called once per poll
+                                   cycle after all three cities are processed.
 
-Thresholds are calibrated for Canadian cities (Ottawa, Toronto, Vancouver)
+All thresholds are calibrated for Canadian cities (Ottawa, Toronto, Vancouver)
 where ±5 °C hourly swings, 80 km/h winds, and moderate winter precipitation
-are plausible but not routine.
+are plausible but not routine. Module-level constants collect every threshold
+so the full calibration picture is visible without reading method bodies.
 """
 
 from __future__ import annotations
@@ -38,6 +40,24 @@ _COOLDOWN = timedelta(hours=3)
 # so that the same 5 °C change is correctly more alarming in stable Vancouver
 # (low stddev) than in volatile Ottawa (high stddev).
 _MIN_TEMP_DELTA = 5.0
+
+# Wind speed above which conditions are dangerous (km/h).
+# Matches Environment Canada's wind warning criterion.
+_DANGEROUS_WIND_KMH = 80.0
+
+# Minimum wind speed change across two consecutive readings to fire wind_shift.
+_WIND_SHIFT_DELTA_KMH = 40.0
+
+# Precipitation rate (mm/h) that qualifies as heavy.
+_HEAVY_PRECIP_MM = 10.0
+
+# Minimum precipitation (mm) per reading to count toward a precip streak.
+_PRECIP_STREAK_MIN_MM = 0.5
+
+# Temperature divergence (°C) between one city and the average of the other
+# two before cross_city_divergence fires.  Same-day inter-city gaps above 15 °C
+# are rare in southern Canada and imply genuinely different weather systems.
+_CROSS_CITY_DIVERGENCE_THRESHOLD = 15.0
 
 # WMO code severity tiers
 _SEVERITY_TIER: dict[str, int] = {
@@ -229,7 +249,7 @@ class EventDetector:
         )
 
     def _check_feels_like_gap(
-        self, new: RawReading, history: list[WeatherReading]
+        self, new: RawReading, history: list[WeatherReading]  # history unused — pure single-reading check
     ) -> EventDict | None:
         gap = abs(new.apparent_temperature - new.temperature)
         if gap <= 8.0:
@@ -248,9 +268,9 @@ class EventDetector:
         )
 
     def _check_dangerous_wind(
-        self, new: RawReading, history: list[WeatherReading]
+        self, new: RawReading, history: list[WeatherReading]  # history unused — pure single-reading check
     ) -> EventDict | None:
-        if new.wind_speed <= 80.0:
+        if new.wind_speed <= _DANGEROUS_WIND_KMH:
             return None
         return _event(
             city=new.city,
@@ -258,9 +278,9 @@ class EventDetector:
             timestamp=new.timestamp,
             summary=f"{new.city} is experiencing dangerous wind speeds of {new.wind_speed:.0f} km/h.",
             reason=(
-                f"Wind speed {new.wind_speed:.1f} km/h exceeds the 80 km/h danger threshold."
+                f"Wind speed {new.wind_speed:.1f} km/h exceeds the {_DANGEROUS_WIND_KMH:.0f} km/h danger threshold."
             ),
-            metrics={"wind_speed": new.wind_speed},
+            metrics={"wind_speed": new.wind_speed, "threshold": _DANGEROUS_WIND_KMH},
         )
 
     def _check_wind_shift(
@@ -269,8 +289,9 @@ class EventDetector:
         if not history:
             return None
         prev_wind = history[0].wind_speed
+        # abs() intentional: both sudden calms and sudden gusts indicate frontal passage.
         delta = abs(new.wind_speed - prev_wind)
-        if delta <= 40.0:
+        if delta <= _WIND_SHIFT_DELTA_KMH:
             return None
         return _event(
             city=new.city,
@@ -279,15 +300,15 @@ class EventDetector:
             summary=f"{new.city} wind speed changed sharply by {delta:.0f} km/h.",
             reason=(
                 f"Wind shifted from {prev_wind:.1f} km/h to {new.wind_speed:.1f} km/h "
-                f"(change of {delta:.1f} km/h), exceeding the 40 km/h threshold."
+                f"(change of {delta:.1f} km/h), exceeding the {_WIND_SHIFT_DELTA_KMH:.0f} km/h threshold."
             ),
-            metrics={"previous_wind_speed": prev_wind, "wind_speed": new.wind_speed, "delta": round(delta, 1)},
+            metrics={"previous_wind_speed": prev_wind, "wind_speed": new.wind_speed, "delta": round(delta, 1), "threshold": _WIND_SHIFT_DELTA_KMH},
         )
 
     def _check_heavy_precipitation(
-        self, new: RawReading, history: list[WeatherReading]
+        self, new: RawReading, history: list[WeatherReading]  # history unused — pure single-reading check
     ) -> EventDict | None:
-        if new.precipitation <= 10.0:
+        if new.precipitation <= _HEAVY_PRECIP_MM:
             return None
         return _event(
             city=new.city,
@@ -295,9 +316,9 @@ class EventDetector:
             timestamp=new.timestamp,
             summary=f"{new.city} recorded {new.precipitation:.1f} mm of precipitation in one hour.",
             reason=(
-                f"Precipitation {new.precipitation:.1f} mm exceeds the 10 mm/h heavy threshold."
+                f"Precipitation {new.precipitation:.1f} mm exceeds the {_HEAVY_PRECIP_MM:.0f} mm/h heavy threshold."
             ),
-            metrics={"precipitation": new.precipitation},
+            metrics={"precipitation": new.precipitation, "threshold": _HEAVY_PRECIP_MM},
         )
 
     def _check_precip_streak(
@@ -307,7 +328,7 @@ class EventDetector:
         if len(history) < 2:
             return None
         streak = [new.precipitation] + [r.precipitation for r in history[:2]]
-        if not all(p > 0.5 for p in streak):
+        if not all(p > _PRECIP_STREAK_MIN_MM for p in streak):
             return None
         total = round(sum(streak), 2)
         return _event(
@@ -316,7 +337,7 @@ class EventDetector:
             timestamp=new.timestamp,
             summary=f"{new.city} has had continuous precipitation across the last 3 readings.",
             reason=(
-                f"All 3 consecutive readings exceeded 0.5 mm (values: "
+                f"All 3 consecutive readings exceeded {_PRECIP_STREAK_MIN_MM} mm (values: "
                 f"{streak[2]:.1f}, {streak[1]:.1f}, {streak[0]:.1f} mm). "
                 f"Total accumulated: {total:.2f} mm."
             ),
@@ -394,13 +415,7 @@ class EventDetector:
         self,
         readings: dict[str, RawReading],
     ) -> EventDict | None:
-        """Fire when one city's temperature diverges more than 15°C from the other two.
-
-        15°C is chosen because same-day inter-city gaps above this are rare in
-        southern Canada — it implies genuinely different weather systems, not just
-        the normal 5–10°C Ottawa/Vancouver climate difference.
-        """
-        _DIVERGENCE_THRESHOLD = 15.0
+        """Fire when one city's temperature diverges more than _CROSS_CITY_DIVERGENCE_THRESHOLD °C from the other two."""
         cities = list(readings.keys())
         temps = {c: readings[c].temperature for c in cities}
 
@@ -408,7 +423,7 @@ class EventDetector:
             others = [c for c in cities if c != city]
             other_avg = sum(temps[c] for c in others) / len(others)
             divergence = abs(temps[city] - other_avg)
-            if divergence <= _DIVERGENCE_THRESHOLD:
+            if divergence <= _CROSS_CITY_DIVERGENCE_THRESHOLD:
                 continue
             direction = "warmer" if temps[city] > other_avg else "colder"
             # Use the outlier city as "city" in the event
@@ -420,7 +435,7 @@ class EventDetector:
                 summary=f"{city} is {divergence:.0f}°C {direction} than the other monitored cities.",
                 reason=(
                     f"{city} ({temps[city]:.1f}°C) diverges {divergence:.1f}°C from "
-                    f"the average of {ref_str}, exceeding the 15°C divergence threshold."
+                    f"the average of {ref_str}, exceeding the {_CROSS_CITY_DIVERGENCE_THRESHOLD:.0f}°C divergence threshold."
                 ),
                 metrics={
                     "temperature": temps[city],
