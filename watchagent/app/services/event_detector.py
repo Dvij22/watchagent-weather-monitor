@@ -101,6 +101,22 @@ _SEVERITY_TIER: dict[str, int] = {
     "light": 0,
 }
 
+# The single most informative metric to surface per event type in the
+# weather_event_fired log line so operators can triage without opening
+# the full event record.
+_KEY_METRIC: dict[str, str] = {
+    "sudden_temp_drop":      "delta",
+    "sudden_temp_rise":      "delta",
+    "city_anomaly":          "z_score",
+    "feels_like_gap":        "gap",
+    "dangerous_wind":        "wind_speed",
+    "wind_shift":            "wind_delta",
+    "heavy_precipitation":   "precipitation",
+    "precip_streak":         "streak_length",
+    "weather_code_severity": "weather_code",
+    "cross_city_divergence": "spread",
+}
+
 def _wmo_tier(code: int) -> str:
     """Map a WMO weather code to one of four named severity tiers."""
     if code >= 95:
@@ -182,11 +198,13 @@ class EventDetector:
             if last is not None and (now - last) < _COOLDOWN:
                 continue
             self._last_fired[key] = now
+            metric_key = _KEY_METRIC.get(result["event_type"])
+            metric_val = result["metrics"].get(metric_key) if metric_key else None
             _logger.info(
-                "event_fired",
+                "weather_event_fired",
                 city=result["city"],
                 event_type=result["event_type"],
-                timestamp=str(result["timestamp"]),
+                **({metric_key: metric_val} if metric_key and metric_val is not None else {}),
                 summary=result["summary"],
             )
             fired.append(result)
@@ -523,11 +541,13 @@ class EventDetector:
             return []
 
         self._last_fired[key] = now
+        metric_key = _KEY_METRIC.get(result["event_type"])
+        metric_val = result["metrics"].get(metric_key) if metric_key else None
         _logger.info(
-            "event_fired",
+            "weather_event_fired",
             city=result["city"],
             event_type=result["event_type"],
-            timestamp=str(result["timestamp"]),
+            **({metric_key: metric_val} if metric_key and metric_val is not None else {}),
             summary=result["summary"],
         )
         return [result]

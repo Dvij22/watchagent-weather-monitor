@@ -1,6 +1,6 @@
 """Readings route — query stored weather readings."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -12,7 +12,8 @@ router = APIRouter(tags=["readings"])
 
 
 @router.get("/readings", response_model=dict[str, list[ReadingOut]])
-def get_readings(
+async def get_readings(
+    request: Request,
     city: str | None = Query(default=None, description="Filter by city name"),
     limit: int = Query(default=50, ge=1, le=500, description="Maximum number of readings to return"),
     db: Session = Depends(get_db),
@@ -34,4 +35,5 @@ def get_readings(
             .all()
         )
 
+    request.state.results_returned = len(rows)
     return {"readings": [ReadingOut.model_validate(r) for r in rows]}

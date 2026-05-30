@@ -13,7 +13,7 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health", response_model=dict[str, Any])
-def health(db: Session = Depends(get_db)) -> dict[str, Any]:
+async def health(db: Session = Depends(get_db)) -> dict[str, Any]:
     """Return service liveness and a count of stored readings and events.
 
     Queries the DB directly so that a broken connection surfaces as a 500

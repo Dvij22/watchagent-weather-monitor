@@ -1,5 +1,6 @@
 """Application configuration loaded from environment variables."""
 
+import re
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,3 +29,12 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached Settings instance (constructed once per process)."""
     return Settings()
+
+
+def mask_db_url(url: str) -> str:
+    """Replace the password in a database URL with '***' for safe logging.
+
+    postgresql://user:secret@host/db  →  postgresql://user:***@host/db
+    sqlite:///path is returned unchanged (no credentials to mask).
+    """
+    return re.sub(r"://([^:@]+):([^@]+)@", r"://\1:***@", url)

@@ -235,3 +235,30 @@ def test_events_metrics_is_dict(engine, test_client):
     metrics = resp.json()["events"][0]["metrics"]
     assert isinstance(metrics, dict)
     assert "gap" in metrics
+
+
+# ---------------------------------------------------------------------------
+# /readings — input validation and edge cases
+# ---------------------------------------------------------------------------
+
+def test_readings_limit_below_minimum_returns_422(test_client):
+    """limit=0 is below the enforced minimum of 1 — FastAPI rejects with 422."""
+    resp = test_client.get("/readings?limit=0")
+    assert resp.status_code == 422
+
+
+def test_readings_limit_above_maximum_returns_422(test_client):
+    """limit=501 exceeds the enforced maximum of 500 — FastAPI rejects with 422."""
+    resp = test_client.get("/readings?limit=501")
+    assert resp.status_code == 422
+
+
+def test_readings_unknown_city_returns_empty_list(test_client):
+    """?city=Moscow has no readings in the DB — response must be {"readings": []} not an error.
+
+    Unknown cities must silently return an empty list rather than a 404 or 500,
+    because the client may legitimately query for a city before any readings exist.
+    """
+    resp = test_client.get("/readings?city=Moscow")
+    assert resp.status_code == 200
+    assert resp.json() == {"readings": []}

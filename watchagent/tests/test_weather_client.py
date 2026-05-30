@@ -121,3 +121,53 @@ async def test_fetch_missing_current_key_returns_none():
     result = await WeatherClient(client=mock).fetch("Toronto")
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_malformed_current_fields_returns_none():
+    """A 200 response where 'current' is present but missing data fields returns None.
+
+    Protects against Open-Meteo returning a partial payload (e.g. only 'time'
+    without the numeric fields) — must log WARNING and return None, not crash
+    with KeyError.
+    """
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status.return_value = None
+    # 'current' exists but is missing temperature_2m, wind_speed_10m, etc.
+    partial_payload = {"current": {"time": "2024-01-15T14:00"}}
+    response.text = str(partial_payload)
+    response.json.return_value = partial_payload
+    mock = AsyncMock(spec=httpx.AsyncClient)
+    mock.get.return_value = response
+
+    result = await WeatherClient(client=mock).fetch("Ottawa")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_current_field_wrong_type_returns_none():
+    """A 200 response where a numeric field is a non-castable string returns None.
+
+    Guards against API schema drift where e.g. temperature_2m becomes "N/A".
+    """
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status.return_value = None
+    bad_payload = {
+        "current": {
+            "time": "2024-01-15T14:00",
+            "temperature_2m": "N/A",       # not castable to float
+            "apparent_temperature": -14.2,
+            "precipitation": 0.2,
+            "wind_speed_10m": 32.4,
+            "weather_code": 61,
+        }
+    }
+    response.text = str(bad_payload)
+    response.json.return_value = bad_payload
+    mock = AsyncMock(spec=httpx.AsyncClient)
+    mock.get.return_value = response
+
+    result = await WeatherClient(client=mock).fetch("Vancouver")
+
+    assert result is None

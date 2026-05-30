@@ -133,14 +133,23 @@ class WeatherClient:
             )
             return None
 
-        timestamp = datetime.fromisoformat(current["time"]).replace(tzinfo=timezone.utc)
-
-        return RawReading(
-            city=city,
-            timestamp=timestamp,
-            temperature=float(current["temperature_2m"]),
-            apparent_temperature=float(current["apparent_temperature"]),
-            precipitation=float(current["precipitation"]),
-            wind_speed=float(current["wind_speed_10m"]),
-            weather_code=int(current["weather_code"]),
-        )
+        try:
+            timestamp = datetime.fromisoformat(current["time"]).replace(tzinfo=timezone.utc)
+            return RawReading(
+                city=city,
+                timestamp=timestamp,
+                temperature=float(current["temperature_2m"]),
+                apparent_temperature=float(current["apparent_temperature"]),
+                precipitation=float(current["precipitation"]),
+                wind_speed=float(current["wind_speed_10m"]),
+                weather_code=int(current["weather_code"]),
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            log.warning(
+                "poll_failed",
+                city=city,
+                http_status=None,
+                attempt_count=attempt_count,
+                error_msg=f"malformed API response — missing or invalid field: {exc}",
+            )
+            return None

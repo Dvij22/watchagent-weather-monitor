@@ -1,6 +1,6 @@
 """Events route — query stored weather events."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -11,7 +11,8 @@ router = APIRouter(tags=["events"])
 
 
 @router.get("/events", response_model=dict[str, list[EventOut]])
-def get_events(
+async def get_events(
+    request: Request,
     city: str | None = Query(default=None, description="Filter by city name"),
     limit: int = Query(default=50, ge=1, le=500, description="Maximum number of events to return"),
     db: Session = Depends(get_db),
@@ -23,4 +24,5 @@ def get_events(
     """
     repo = EventRepository(db)
     rows = repo.get_all(city=city, limit=limit)
+    request.state.results_returned = len(rows)
     return {"events": [EventOut.model_validate(r) for r in rows]}

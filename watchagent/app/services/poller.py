@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import structlog
 import structlog.stdlib
@@ -51,6 +52,7 @@ class Poller:
 
     async def _poll_cycle(self, log: structlog.stdlib.BoundLogger) -> None:
         """Fetch all cities concurrently, persist each result, then run cross-city checks."""
+        cycle_start = time.perf_counter()
         cities = list(CITIES)
         results: list[RawReading | None] = list(
             await asyncio.gather(
@@ -59,26 +61,53 @@ class Poller:
             )
         )
 
+        new_count = 0
+        dup_count = 0
+        events_fired = 0
         new_readings: dict[str, RawReading] = {}
+
         for city, reading in zip(cities, results):
             if reading is None:
                 continue
-            stored = await self._handle_reading(reading, log.bind(city=city))
+            try:
+                stored, n_events = await self._handle_reading(reading, log.bind(city=city))
+            except Exception:
+                log.error(
+                    "reading_cycle_failed",
+                    city=city,
+                    exc_info=True,
+                )
+                continue
             if stored:
+                new_count += 1
+                events_fired += n_events
                 new_readings[city] = reading
+            else:
+                dup_count += 1
 
         # Cross-city comparison — only runs when all cities produced a new reading
         if len(new_readings) == len(cities):
-            await self._run_cross_city_detection(new_readings, log)
+            events_fired += await self._run_cross_city_detection(new_readings, log)
+
+        cycle_ms = round((time.perf_counter() - cycle_start) * 1000, 1)
+        log.info(
+            "poll_cycle_complete",
+            cities_polled=len(cities),
+            new_readings=new_count,
+            duplicates=dup_count,
+            events_fired=events_fired,
+            cycle_duration_ms=cycle_ms,
+        )
 
     async def _handle_reading(
         self,
         reading: RawReading,
         log: structlog.stdlib.BoundLogger,
-    ) -> bool:
+    ) -> tuple[bool, int]:
         """Insert a reading and trigger per-city event detection.
 
-        Returns True if the reading was new (not a duplicate), False otherwise.
+        Returns (True, n) when the reading was new and n events fired,
+        or (False, 0) when it was a duplicate.
         """
         db = SessionLocal()
         try:
@@ -102,10 +131,10 @@ class Poller:
             )
 
             if is_duplicate:
-                return False
+                return False, 0
 
-            await self._run_event_detection(reading, history, db, log)
-            return True
+            n_events = await self._run_event_detection(reading, history, db, log)
+            return True, n_events
 
         except Exception:
             log.error(
@@ -125,11 +154,24 @@ class Poller:
         history: list[WeatherReading],
         db: Session,
         log: structlog.stdlib.BoundLogger,
-    ) -> None:
-        """Run all per-city event checks and persist any that fired."""
-        events = self._detector.detect_events(reading, history)
+    ) -> int:
+        """Run all per-city event checks, persist any that fired, return count.
+
+        Any unexpected exception from the detector is caught, logged at ERROR,
+        and swallowed so the rest of the poll cycle continues uninterrupted.
+        """
+        try:
+            events = self._detector.detect_events(reading, history)
+        except Exception:
+            log.error(
+                "event_detection_failed",
+                city=reading.city,
+                exc_info=True,
+            )
+            return 0
+
         if not events:
-            return
+            return 0
 
         event_repo = EventRepository(db)
         for event_data in events:
@@ -144,15 +186,17 @@ class Poller:
                 )
                 raise
 
+        return len(events)
+
     async def _run_cross_city_detection(
         self,
         readings: dict[str, RawReading],
         log: structlog.stdlib.BoundLogger,
-    ) -> None:
-        """Run cross-city comparison checks and persist any events that fired."""
+    ) -> int:
+        """Run cross-city comparison checks, persist any events that fired, return count."""
         events = self._detector.detect_cross_city_events(readings)
         if not events:
-            return
+            return 0
 
         db = SessionLocal()
         try:
@@ -172,3 +216,5 @@ class Poller:
             raise
         finally:
             db.close()
+
+        return len(events)
