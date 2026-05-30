@@ -328,29 +328,35 @@ def test_adaptive_threshold_recorded_in_metrics():
 
 
 def test_cross_city_divergence_fires():
-    """When one city is 16 °C warmer than the average of the other two, the event fires."""
+    """Ottawa=-15, Toronto=-5, Vancouver=10 → spread=25°C > 20°C threshold → fires."""
     detector = EventDetector()
     readings = {
-        "Vancouver": sample_reading(city="Vancouver", temperature=20.0, apparent_temperature=20.0),
-        "Ottawa": sample_reading(city="Ottawa", temperature=3.0, apparent_temperature=3.0),
-        "Toronto": sample_reading(city="Toronto", temperature=5.0, apparent_temperature=5.0),
+        "Ottawa":    sample_reading(city="Ottawa",    temperature=-15.0, apparent_temperature=-15.0),
+        "Toronto":   sample_reading(city="Toronto",   temperature=-5.0,  apparent_temperature=-5.0),
+        "Vancouver": sample_reading(city="Vancouver", temperature=10.0,  apparent_temperature=10.0),
     }
-    # Vancouver avg_others = (3+5)/2 = 4, divergence = 16 °C → should fire
     events = detector.detect_cross_city_events(readings)
     assert len(events) == 1
-    assert events[0]["event_type"] == "cross_city_divergence"
-    assert events[0]["city"] == "Vancouver"
+    e = events[0]
+    assert e["event_type"] == "cross_city_divergence"
+    assert e["city"] == "ALL"
+    assert e["metrics"]["spread"] == 25.0
+    assert e["metrics"]["warmest"] == "Vancouver"
+    assert e["metrics"]["coldest"] == "Ottawa"
+    assert e["metrics"]["ottawa"] == -15.0
+    assert e["metrics"]["toronto"] == -5.0
+    assert e["metrics"]["vancouver"] == 10.0
 
 
 def test_cross_city_divergence_no_fire():
-    """When spread is within 15 °C, no event should fire."""
+    """All three cities within 15°C of each other → spread=12°C < 20°C → no fire."""
     detector = EventDetector()
     readings = {
-        "Vancouver": sample_reading(city="Vancouver", temperature=5.0, apparent_temperature=5.0),
-        "Ottawa": sample_reading(city="Ottawa", temperature=-8.0, apparent_temperature=-8.0),
-        "Toronto": sample_reading(city="Toronto", temperature=-5.0, apparent_temperature=-5.0),
+        "Ottawa":    sample_reading(city="Ottawa",    temperature=0.0,  apparent_temperature=0.0),
+        "Toronto":   sample_reading(city="Toronto",   temperature=8.0,  apparent_temperature=8.0),
+        "Vancouver": sample_reading(city="Vancouver", temperature=12.0, apparent_temperature=12.0),
     }
-    # Vancouver avg_others = (-8 + -5)/2 = -6.5, divergence = 11.5 °C → should not fire
+    # spread = 12 - 0 = 12°C < 20°C → should not fire
     events = detector.detect_cross_city_events(readings)
     assert not events
 
@@ -369,12 +375,13 @@ def test_cross_city_divergence_cooldown():
     """A second call with the same divergent conditions within the cooldown window is suppressed."""
     detector = EventDetector()
     readings = {
-        "Vancouver": sample_reading(city="Vancouver", temperature=20.0, apparent_temperature=20.0),
-        "Ottawa": sample_reading(city="Ottawa", temperature=3.0, apparent_temperature=3.0),
-        "Toronto": sample_reading(city="Toronto", temperature=5.0, apparent_temperature=5.0),
+        "Ottawa":    sample_reading(city="Ottawa",    temperature=-15.0, apparent_temperature=-15.0),
+        "Toronto":   sample_reading(city="Toronto",   temperature=-5.0,  apparent_temperature=-5.0),
+        "Vancouver": sample_reading(city="Vancouver", temperature=10.0,  apparent_temperature=10.0),
     }
     first = detector.detect_cross_city_events(readings)
     assert first, "expected first call to fire"
+    assert first[0]["city"] == "ALL"
     second = detector.detect_cross_city_events(readings)
     assert not second, "expected cooldown to suppress second call"
 

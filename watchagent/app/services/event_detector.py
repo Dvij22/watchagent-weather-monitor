@@ -67,11 +67,12 @@ _HEAVY_PRECIP_MM = 7.5
 # Minimum precipitation (mm) per reading to count toward a precip streak.
 _PRECIP_STREAK_MIN_MM = 0.5
 
-# Temperature divergence (°C) between one city and the average of the other
-# two before cross_city_divergence fires.  12 °C gaps across southern Canada
-# (Ottawa/Toronto/Vancouver) indicate clearly distinct weather systems —
-# e.g., a Pacific front hitting Vancouver while Ontario is still warm.
-_CROSS_CITY_DIVERGENCE_THRESHOLD = 12.0
+# Temperature spread (°C) across all three cities — max(temps) - min(temps) —
+# above which cross_city_divergence fires.  A 20 °C spread means the warmest
+# and coldest monitored cities are in genuinely separate air masses on the same
+# day.  A Pacific front in Vancouver (-15 °C) while Ottawa sits at +10 °C
+# produces a 25 °C spread — the canonical Canadian example.
+_CROSS_CITY_DIVERGENCE_THRESHOLD = 20.0
 
 # Minimum recent readings required before city_anomaly can fire.
 # Fewer than 6 points yields an unreliable standard deviation estimate.
@@ -535,39 +536,46 @@ class EventDetector:
         self,
         readings: dict[str, RawReading],
     ) -> EventDict | None:
-        """Fire when one city's temperature diverges more than _CROSS_CITY_DIVERGENCE_THRESHOLD °C from the other two."""
-        cities = list(readings.keys())
-        temps = {c: readings[c].temperature for c in cities}
+        """Fire when max(temps) - min(temps) across all three cities exceeds _CROSS_CITY_DIVERGENCE_THRESHOLD °C.
 
-        for city in cities:
-            others = [c for c in cities if c != city]
-            other_avg = sum(temps[c] for c in others) / len(others)
-            divergence = abs(temps[city] - other_avg)
-            if divergence <= _CROSS_CITY_DIVERGENCE_THRESHOLD:
-                continue
-            direction = "warmer" if temps[city] > other_avg else "colder"
-            # Use the outlier city as "city" in the event
-            ref_str = " and ".join(f"{c} ({temps[c]:.1f}°C)" for c in others)
-            return _event(
-                city=city,
-                event_type="cross_city_divergence",
-                timestamp=readings[city].timestamp,
-                summary=(
-                    f"{city} ({temps[city]:.1f}°C) is {divergence:.1f}°C {direction} than the "
-                    f"{other_avg:.1f}°C average of the other monitored cities — "
-                    f"a distinct weather system is likely."
-                ),
-                reason=(
-                    f"{city} temperature ({temps[city]:.1f}°C) diverges {divergence:.1f}°C from "
-                    f"the mean of {ref_str} (average {other_avg:.1f}°C), exceeding the "
-                    f"{_CROSS_CITY_DIVERGENCE_THRESHOLD:.0f}°C inter-city divergence threshold. "
-                    f"Gaps this large across southern Canada indicate genuinely separate weather systems."
-                ),
-                metrics={
-                    "temperature": temps[city],
-                    "other_average": round(other_avg, 2),
-                    "divergence": round(divergence, 2),
-                    "other_cities": {c: temps[c] for c in others},
-                },
-            )
-        return None
+        Uses the full spread (warmest minus coldest) rather than a per-city deviation
+        so the event is symmetric and unambiguously reports a region-wide split.
+        The event is attributed to city="ALL" because no single city is the outlier —
+        the spread itself is the phenomenon.
+        """
+        temps = {city: readings[city].temperature for city in readings}
+
+        warmest = max(temps, key=lambda c: temps[c])
+        coldest = min(temps, key=lambda c: temps[c])
+        spread = round(temps[warmest] - temps[coldest], 1)
+
+        if spread <= _CROSS_CITY_DIVERGENCE_THRESHOLD:
+            return None
+
+        city_detail = ", ".join(
+            f"{c} {temps[c]:.1f}°C" for c in sorted(temps)
+        )
+        return _event(
+            city="ALL",
+            event_type="cross_city_divergence",
+            timestamp=readings[warmest].timestamp,
+            summary=(
+                f"The three monitored cities span {spread:.1f}°C — "
+                f"{warmest} ({temps[warmest]:.1f}°C) vs {coldest} ({temps[coldest]:.1f}°C). "
+                f"Distinct air masses are active across the region."
+            ),
+            reason=(
+                f"Temperature spread across all three cities is {spread:.1f}°C "
+                f"({city_detail}), exceeding the {_CROSS_CITY_DIVERGENCE_THRESHOLD:.0f}°C "
+                f"divergence threshold. A spread this large in southern Canada means "
+                f"{warmest} and {coldest} are in genuinely separate weather systems."
+            ),
+            metrics={
+                "ottawa": temps.get("Ottawa"),
+                "toronto": temps.get("Toronto"),
+                "vancouver": temps.get("Vancouver"),
+                "spread": spread,
+                "warmest": warmest,
+                "coldest": coldest,
+            },
+        )

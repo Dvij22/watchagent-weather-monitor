@@ -1,4 +1,4 @@
-# WatchAgent
+﻿# WatchAgent
 
 A weather monitoring service that polls [Open-Meteo](https://open-meteo.com/) every 5 minutes for Ottawa, Toronto, and Vancouver, persists readings to PostgreSQL, runs ten event detectors against each new reading, and exposes the stored data through a FastAPI REST API. The system is designed for reliable unattended operation: failed polls are retried with backoff, duplicate readings are silently discarded, and event spam on sustained conditions is suppressed by a per-city, per-type cooldown.
 
@@ -160,22 +160,22 @@ The central question is not "what can we detect?" but "what is worth surfacing?"
 
 **Checks considered and rejected:** UV index (not in the Open-Meteo current-weather fields), humidity (not available in the free tier endpoint), and day-over-day comparison (requires 24+ hours of history before it can fire at all, making it useless for a freshly deployed instance).
 
-### Thresholds and calibration
+### Thresholds, calibration, and failure modes
 
 The `EventDetector` runs all ten checks against every new reading using the previous 24 readings as history context. Per-city checks return an event dict with six required keys: `city`, `event_type`, `timestamp`, `summary`, `reason`, `metrics`. The cross-city check runs once per poll cycle after all three cities are processed. A 3-hour in-memory cooldown per `(city, event_type)` pair prevents re-firing on sustained conditions.
 
-| Event type | Threshold | Why this threshold |
+| Event type | Threshold | Failure mode it prevents |
 |---|---|---|
-| `sudden_temp_drop` | > `max(5.0, stddev × 2)` from previous reading | Adapts to each city's observed variability; the 5 °C floor ensures cold-start sensitivity while Vancouver's low stddev and Ottawa's high stddev both get calibrated responses |
-| `sudden_temp_rise` | > `max(5.0, stddev × 2)` from previous reading | Symmetric with drop; chinook and föhn events can produce fast rises in Ottawa/Toronto that need less suppression in stable Vancouver |
-| `city_anomaly` | \|z-score\| > 2.0, min 6 readings | 2σ captures the outer 5% of a normal distribution; the 6-reading minimum avoids cold-start false positives when stddev is artificially low from insufficient data |
-| `feels_like_gap` | `abs(apparent − actual)` > 8 °C | An 8 °C wind-chill or humidity gap is operationally dangerous; below this, the difference is noticeable but not a safety concern |
-| `dangerous_wind` | wind speed > 80 km/h | 80 km/h is the Environment Canada threshold for official wind warnings; below this, gusts are unpleasant but not structurally dangerous |
-| `wind_shift` | single-poll change > 40 km/h | A 40 km/h jump in one 5-minute poll indicates a frontal passage or squall line, not ordinary wind variability |
-| `heavy_precipitation` | > 10 mm/h in one reading | 10 mm/h is the standard meteorological definition of heavy rain; this maps directly to the Open-Meteo hourly precipitation field |
-| `precip_streak` | 3 consecutive readings each > 0.5 mm | Three consecutive wet readings (at least 15 minutes of continuous precipitation) distinguishes a sustained event from a single shower spike |
-| `weather_code_severity` | WMO code escalates to a higher tier | Fires only on tier transitions (light → heavy rain → heavy snow → thunderstorm), not on code-within-tier changes, which eliminates spam during sustained storms |
-| `cross_city_divergence` | one city > 15 °C from the other two's average | Ottawa–Vancouver normal difference is 5–12 °C; 15 °C+ indicates genuinely separate synoptic systems and is rare enough to be worth surfacing |
+| `sudden_temp_drop` | > `max(3.0, stddev x 2)` from previous reading | **Adapting to city volatility.** A fixed floor would routinely miss Vancouver's smaller but equally meaningful drops (oceanic climate, s ~0.5-1 C/reading) while firing too eagerly in Ottawa (continental climate, s ~2-4 C). Using 2x the city's own recent stddev means the same relative surprise triggers the event in both cities. |
+| `sudden_temp_rise` | > `max(3.0, stddev x 2)` from previous reading | **Symmetric with drop; guards against chinook false negatives.** A fixed global threshold would miss the rapid warming spikes Ottawa and Toronto see during chinook-like events (14 C in one reading in live data), while a threshold calibrated for Ottawa would fire on every mild Vancouver afternoon. |
+| `city_anomaly` | \|z-score\| > 2.0, min 6 readings | **Threshold is relative to each city's own history, because Ottawa's normal range is 40 C wider than Vancouver's -- a global threshold would either spam Ottawa or miss Vancouver.** The 6-reading minimum prevents cold-start false positives when stddev is artificially low. |
+| `feels_like_gap` | abs(apparent - actual) > 6 C | **Guards against the 'looks warm, is dangerous' failure.** Someone checking only the thermometer at 17 C misses the 10.9 C wind-chill reality -- a 6 C gap is the point where clothing recommendations and safety advice diverge materially from the thermometer. |
+| `dangerous_wind` | wind speed > 70 km/h | **Guards against under-reporting winds that precede structural damage.** Environment Canada issues wind advisories from 60-70 km/h. Setting the threshold at 80 km/h (the full warning level) would miss the advisory window entirely. |
+| `wind_shift` | single-poll change > 30 km/h | **Guards against missing frontal passage signals.** A gradual increase over hours is normal; a 30 km/h change in one 5-minute poll is the wind signature of a squall line or cold front. Live Ottawa data showed exactly this shift during a frontal passage. |
+| `heavy_precipitation` | > 7.5 mm/h in one reading | **Guards against missing moderate-heavy events that cause urban flooding.** A higher threshold (20 mm/h) would only catch cloudbursts. 7.5 mm/h is the lower bound of Environment Canada's 'heavy rain' category -- the level where drainage systems begin to struggle. |
+| `precip_streak` | 3 consecutive readings each > 0.5 mm | **Single-reading spikes are noise. Three consecutive readings above 0.5 mm indicates sustained precipitation worth surfacing.** A single wet reading can be a sensor artefact or a brief shower already over. Three readings (>=15 min continuous) ensures the event describes something the user is still experiencing. |
+| `weather_code_severity` | WMO code escalates to a higher tier | **Guards against tier-boundary spam during sustained storms.** Without this, a thunderstorm oscillating between WMO codes 95 and 96 would fire on every poll cycle. Firing only on tier transitions (light to heavy rain to heavy snow to thunderstorm) means one event per escalation. |
+| `cross_city_divergence` | max(temps) - min(temps) > 20 C | **Guards against missing region-wide weather system splits.** Ottawa-Vancouver differences of 5-15 C are normal; 20 C+ means the cities are in genuinely separate synoptic systems. The spread (max-min) is used instead of per-city deviation so no single city is falsely labelled the outlier. |
 
 ---
 
@@ -222,13 +222,31 @@ docker compose exec api python .cursor/skills/replay_detection.py --n 48 --city 
 
 ## Technology Choices
 
-| Technology | Reason |
-|---|---|
-| **FastAPI** | Native async, automatic OpenAPI docs at `/docs`, and first-class Pydantic integration mean the API layer requires almost no boilerplate. The `response_model` parameter catches schema drift at startup rather than at runtime. |
-| **SQLAlchemy 2.x** | The `Mapped`/`mapped_column` API gives full static type-checker support on ORM models, and the same models work against both SQLite (tests) and PostgreSQL (production) without changes — the test suite runs entirely in-memory. |
-| **structlog** | Structured key-value output is machine-parseable by default. Binding context once per component (`bind(city=city, component="poller")`) eliminates the repetitive field-passing that makes stdlib `logging` fragile at scale. |
-| **tenacity** | Declarative retry policy with `stop_after_attempt` + `wait_fixed` keeps the retry logic out of the business logic. Both values are configurable via `WEATHER_API_RETRY_ATTEMPTS` and `WEATHER_API_RETRY_WAIT_SECONDS` environment variables. |
-| **PostgreSQL** | The `(city, timestamp)` unique constraint for deduplication requires a real unique index. PostgreSQL's `pg_isready` healthcheck integrates with Docker Compose's `condition: service_healthy` so the poller never starts before the DB is ready. |
+| Technology | Reason | What I considered and rejected |
+|---|---|---|
+| **FastAPI** | Native async, automatic OpenAPI docs at `/docs`, and first-class Pydantic integration mean the API layer requires almost no boilerplate. The `response_model` parameter catches schema drift at startup rather than at runtime. | Considered Flask, but Flask's sync-by-default model would have required Gunicorn worker threads to avoid blocking the event loop while the poller's `asyncio.gather` was in flight. FastAPI's native async support matters specifically because the poller and API share the same SQLAlchemy session factory — both need to be async-safe without extra wiring. |
+| **SQLAlchemy 2.x** | The `Mapped`/`mapped_column` API gives full static type-checker support on ORM models, and the same models work against both SQLite (tests) and PostgreSQL (production) without changes — the test suite runs entirely in-memory. | Considered raw `psycopg2` queries for simplicity, but the SQLite-in-memory test strategy would have been impossible — SQLite and PostgreSQL have different SQL dialects for things like `RETURNING` and `ON CONFLICT`. The ORM abstraction is worth it specifically for test isolation. |
+| **structlog** | Structured key-value output is machine-parseable by default. Binding context once per component (`bind(city=city, component="poller")`) eliminates the repetitive field-passing that makes stdlib `logging` fragile at scale. | Considered stdlib `logging` with a `JSONFormatter`, but `logging`'s thread-local context mechanism (`LoggerAdapter`) does not compose cleanly with `asyncio` — binding `city` to a logger in one coroutine leaks into another coroutine on the same thread. `structlog`'s immutable `bind()` returns a new bound logger, which is safe to pass through `asyncio.gather` without shared state. |
+| **tenacity** | Declarative retry policy with `stop_after_attempt` + `wait_fixed` keeps the retry logic out of the business logic. Both values are configurable via `WEATHER_API_RETRY_ATTEMPTS` and `WEATHER_API_RETRY_WAIT_SECONDS` environment variables. | Considered a manual `for attempt in range(3)` retry loop, but manual loops accumulate accidental complexity: you add a counter, then a sleep, then realise you need to distinguish transient HTTP errors from permanent 4xx errors, then add a log line per attempt. Tenacity handles all of this declaratively and the intent is visible at a glance. It also makes the retry behaviour testable by patching `asyncio.sleep` rather than timing real sleeps. |
+| **PostgreSQL unique constraint** | The `(city, timestamp)` unique constraint for deduplication requires a real unique index. PostgreSQL's `pg_isready` healthcheck integrates with Docker Compose's `condition: service_healthy` so the poller never starts before the DB is ready. | Considered application-level deduplication — checking `SELECT 1 FROM readings WHERE city=? AND timestamp=?` before each insert. The problem is a TOCTOU race: two poller instances (or a restart during an insert) can both see no existing row, both proceed to insert, and one silently overwrites the other. The DB-level unique constraint makes the duplicate check atomic — the `IntegrityError` is the check — and eliminates the race entirely. |
+
+---
+
+## What I Would Do With More Time
+
+These are the four highest-value improvements I did not have time to implement. I am listing them explicitly because they represent known gaps in the current design, not open questions.
+
+**1. Persist cooldown state so poller restarts do not re-fire suppressed events.**
+The 3-hour per-`(city, event_type)` cooldown lives in `EventDetector._last_fired`, a plain Python dict that is discarded when the process exits. A container restart during a sustained storm re-fires every event that was already suppressed in that window. The fix is a `weather_cooldowns` table: write `(city, event_type, fired_at)` on each fire, read all rows with `fired_at > now - 3h` on startup, and seed `_last_fired` from them. The cost is one extra DB write per event fired and one read on startup — both negligible compared to the correctness gain.
+
+**2. Cross-city comparison using rolling 24-hour baselines, not just the current snapshot.**
+`cross_city_divergence` compares the three cities' current temperatures in one point-in-time snapshot. A more useful version would compare each city's current temperature against its own 24-hour mean, then compare those normalised deviations across cities. This would catch the case where Vancouver is colder than Ottawa today but warmer than its own baseline — an anomaly that the current check misses entirely because the absolute temperatures are in normal ranges.
+
+**3. Map WMO codes to human-readable severity descriptions.**
+The `weather_code_severity` event currently reports the raw WMO code (e.g., `95`) in the summary and reason strings. The WMO publishes a complete mapping (code 95 = "Thunderstorm, slight or moderate"; code 96 = "Thunderstorm with slight hail"). Adding a `_WMO_DESCRIPTIONS: dict[int, str]` lookup table to `event_detector.py` would make the event summary readable without a separate reference, and would let the API surface the human description directly in the `metrics` dict.
+
+**4. Alerting webhook when high-severity events fire.**
+Currently all events are written to the database and exposed only through the polling `GET /events` endpoint. A production-grade monitor would POST a payload to a configurable webhook URL (Slack, PagerDuty, email gateway) when certain event types fire — at minimum `dangerous_wind`, `heavy_precipitation`, and `weather_code_severity` escalating to `thunderstorm`. The implementation is a small `WebhookNotifier` class called from `_run_event_detection` after `event_repo.insert()`, with `WEBHOOK_URL` as an optional env var (no webhook = no-op).
 
 ---
 
