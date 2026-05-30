@@ -2,29 +2,31 @@
 Every event dict produced by EventDetector (app/services/event_detector.py) must
 contain exactly these six keys — no more, no fewer:
 
-  city        (str)      — one of: "Ottawa", "Toronto", "Vancouver"
+  city        (str)      — one of: "Ottawa", "Toronto", "Vancouver", or "ALL"
+                           ("ALL" is used only by cross_city_divergence)
   event_type  (str)      — one of the ten strings listed below
   timestamp   (datetime) — timezone-aware UTC datetime from the RawReading
-  summary     (str)      — one human-readable sentence; must include the city name,
-                           the key numeric value, and the unit
+  summary     (str)      — one human-readable sentence; must include the city name
+                           (or "The three monitored cities" for ALL), the key
+                           numeric value, and the unit
   reason      (str)      — explains WHY it fired; must include the actual measured
                            value AND the threshold that was crossed
   metrics     (dict)     — all numeric values referenced in reason; threshold-based
                            events must include a "threshold" key
 
 ALLOWED event_type VALUES (exactly these ten strings):
-  sudden_temp_drop       — city-adaptive threshold (2× recent stddev, min 5.0°C)
+  sudden_temp_drop       — city-adaptive threshold (max(3.0, 2×recent stddev) °C)
   sudden_temp_rise       — same adaptive threshold
-  city_anomaly           — z-score > 2.0 against city's own recent baseline
-  feels_like_gap         — apparent vs actual temperature divergence > 8.0°C
-  dangerous_wind         — wind speed > 80.0 km/h (Environment Canada criterion)
-  wind_shift             — single-poll wind speed change > 40.0 km/h
-  heavy_precipitation    — hourly precipitation > 10.0 mm
+  city_anomaly           — z-score > 2.0 against city's own recent baseline (min 6 readings)
+  feels_like_gap         — abs(apparent − actual) > 6.0°C
+  dangerous_wind         — wind speed > 70.0 km/h (Environment Canada advisory threshold)
+  wind_shift             — single-poll wind speed change > 30.0 km/h
+  heavy_precipitation    — precipitation > 7.5 mm in one reading
   precip_streak          — 3 consecutive readings each > 0.5 mm
   weather_code_severity  — WMO code escalates to a higher severity tier
-  cross_city_divergence  — one city > 15.0°C from the average of the other two
+  cross_city_divergence  — max(city temps) − min(city temps) > 20.0°C
 
-METRIC KEYS — required keys per event type:
+METRIC KEYS — exact keys per event type (must match what event_detector.py stores):
   sudden_temp_drop / sudden_temp_rise:
     previous_temperature, temperature, delta, threshold
   city_anomaly:
@@ -42,19 +44,22 @@ METRIC KEYS — required keys per event type:
   weather_code_severity:
     previous_weather_code, weather_code, previous_tier, new_tier
   cross_city_divergence:
-    temperature, other_average, divergence, other_cities
+    ottawa, toronto, vancouver, spread, warmest, coldest
 
 EXAMPLE of a correctly-formed event:
 {
   "city": "Ottawa",
   "event_type": "feels_like_gap",
   "timestamp": "2024-01-15T14:00:00+00:00",
-  "summary": "Ottawa feels 11.0°C colder than the thermometer reads: apparent -6.0°C vs actual 5.0°C (wind chill).",
-  "reason": "Apparent temperature (-6.0°C) deviates 11.0°C from actual (5.0°C), exceeding the 8.0°C gap threshold. The gap is driven by wind chill.",
-  "metrics": {"temperature": 5.0, "apparent_temperature": -6.0, "gap": 11.0}
+  "summary": "Ottawa feels 8.0°C colder than the thermometer reads: apparent -3.0°C vs actual 5.0°C (wind chill).",
+  "reason": "Apparent temperature (-3.0°C) deviates 8.0°C from actual (5.0°C), exceeding the 6.0°C gap threshold. The gap is driven by wind chill at 35 km/h.",
+  "metrics": {"temperature": 5.0, "apparent_temperature": -3.0, "gap": 8.0}
 }
 
 NOTE on adaptive thresholds: sudden_temp_drop and sudden_temp_rise use a
-city-adaptive threshold (max(5.0, stddev×2) from recent history). The resolved
+city-adaptive threshold (max(3.0, stddev×2) from recent history). The resolved
 threshold must always appear in metrics["threshold"].
+
+NOTE on cross_city_divergence: city is always "ALL". The spread is
+max(temps) − min(temps) across Ottawa, Toronto, and Vancouver.
 ---

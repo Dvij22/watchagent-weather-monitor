@@ -8,29 +8,63 @@ LOGGER SETUP
   third-party libraries into the structured pipeline. Do not remove it.
 
 CONTEXT BINDING — bind before logging, not at the log call:
-  - In app/services/poller.py:        bind(city=city, component="poller")
+  - In app/services/poller.py:        bind(component="poller")
   - In app/services/weather_client.py: bind(city=city, component="weather_client")
-  - In app/api/main.py middleware:     bind(request_id=uuid, method=method, path=path)
+  - In app/api/main.py middleware:     each request cleared via clear_contextvars();
+                                       request_id, method, path set via bind_contextvars()
   - In app/repositories/:              no binding needed (caller provides context)
 
-LOG LEVELS — use these exact levels for these exact conditions:
-  DEBUG:   raw Open-Meteo API response body (event key: "api_response_raw",
-           field: body=response.text)
-  INFO:    reading inserted successfully (event key: "reading_stored",
-           fields: city, timestamp, duplicate=False)
-           reading skipped as duplicate (event key: "reading_skipped",
-           fields: city, timestamp, duplicate=True)
-           event fired and persisted (event key: "event_fired",
-           fields: city, event_type, timestamp, summary)
-           API request completed (event key: "request_completed",
-           fields: status_code, duration_ms)
-           DB tables created (event key: "db_init_complete")
-  WARNING: Open-Meteo poll failed after all retries (event key: "poll_failed",
-           fields: city (str), http_status (int|None), attempt_count (int),
-           error_msg (str)). This is the ONLY warning type in the hot path.
-  ERROR:   Unexpected exception in _handle_reading, event persistence, or DB init
-           (event key: "reading_handle_failed", "event_persist_failed",
-           "db_init_failed"). ALL ERROR logs must include exc_info=True.
+LOG LEVELS — use these exact event keys and fields:
+
+  DEBUG:
+    raw Open-Meteo API response body
+      event key: "api_response_raw"
+      fields:    body=response.text
+
+  INFO:
+    reading inserted (new or duplicate)
+      event key: "reading_stored"
+      fields:    city, timestamp, duplicate=True|False
+    reading skipped as duplicate (emitted by ReadingRepository)
+      event key: "reading_skipped"
+      fields:    city, timestamp
+    event passed cooldown and fired (emitted by EventDetector)
+      event key: "weather_event_fired"
+      fields:    city, event_type, <key_metric>=<value>, summary
+                 where <key_metric> is the single most informative numeric field
+                 (e.g. z_score for city_anomaly, delta for sudden_temp_drop, gap
+                 for feels_like_gap, wind_speed for dangerous_wind, spread for
+                 cross_city_divergence)
+    event persisted to DB (emitted by EventRepository.insert)
+      event key: "event_fired"
+      fields:    city, event_type, timestamp, summary
+    poll cycle summary (emitted by Poller after each complete cycle)
+      event key: "poll_cycle_complete"
+      fields:    cities_polled, new_readings, duplicates, events_fired, cycle_duration_ms
+    API request completed (emitted by middleware in app/api/main.py)
+      event key: "api_request"
+      fields:    method, path, city_filter (str|null), results_returned (int|null),
+                 duration_ms, status_code, request_id
+    DB tables created
+      event key: "db_init_complete"
+    DB readiness confirmed
+      event key: "db_ready"
+      fields:    attempt
+
+  WARNING:
+    Open-Meteo poll failed after all retries
+      event key: "poll_failed"
+      fields:    city (str), http_status (int|None), attempt_count (int), error_msg (str)
+      This is the ONLY warning type in the hot path.
+    DB not ready, retrying
+      event key: "db_not_ready_retrying"
+      fields:    attempt, max_attempts, wait_seconds, error
+
+  ERROR:
+    Unexpected exception in reading handling, event persistence, or DB init
+      event keys: "reading_handle_failed", "event_detection_failed",
+                  "event_persist_failed", "db_init_failed", "reading_cycle_failed"
+      ALL ERROR logs must include exc_info=True.
 
 RULES:
 - Duplicate readings (IntegrityError) are INFO with duplicate=True, never WARNING or ERROR.
@@ -38,4 +72,5 @@ RULES:
   http_status is None when the failure is not an HTTP status error (timeout, DNS, etc.).
 - Every ERROR log must include exc_info=True so the stack trace is captured.
 - Never log sensitive data (database credentials, API keys) at any level.
+  Use mask_db_url() (app/config.py) for any log line that includes a DB URL.
 ---

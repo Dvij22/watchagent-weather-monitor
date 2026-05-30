@@ -42,6 +42,7 @@ class EventRepository:
             city=row.city,
             event_type=row.event_type,
             timestamp=str(row.timestamp),
+            summary=row.summary,
         )
         return row
 

@@ -21,7 +21,7 @@ _SAMPLE_EVENT = {
     "event_type": "feels_like_gap",
     "timestamp": _BASE_TS,
     "summary": "Ottawa feels 11°C colder than the actual temperature.",
-    "reason": "Apparent temp (-6°C) deviates 11°C from actual (5°C), exceeding 8°C threshold.",
+    "reason": "Apparent temp (-6°C) deviates 11°C from actual (5°C), exceeding 6°C threshold.",
     "metrics": {"temperature": 5.0, "apparent_temperature": -6.0, "gap": 11.0},
 }
 

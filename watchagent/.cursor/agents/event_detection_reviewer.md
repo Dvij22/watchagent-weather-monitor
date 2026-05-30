@@ -16,20 +16,22 @@ Canadian climate context you must apply when evaluating thresholds:
 - Vancouver (oceanic maritime): rarely below −5°C or above +30°C. Very stable
   temperatures — a 5°C swing that is routine in Ottawa is unusual in Vancouver.
 - All three cities can see 80+ km/h winds and 10+ mm/h rain during severe events.
-- The adaptive temperature threshold (max(5.0, stddev×2)) is specifically designed
-  to calibrate per-city: Vancouver's low stddev keeps the threshold near the 5°C
+- The adaptive temperature threshold (max(3.0, stddev×2)) is specifically designed
+  to calibrate per-city: Vancouver's low stddev keeps the threshold near the 3°C
   floor; Ottawa's high stddev raises it appropriately.
 
 The ten event types this system produces (all in app/services/event_detector.py):
   sudden_temp_drop, sudden_temp_rise — single-poll temperature change
   city_anomaly                       — z-score against city's own recent baseline
-  feels_like_gap                     — apparent vs actual divergence (wind chill / humidity)
-  dangerous_wind                     — absolute wind speed threshold
-  wind_shift                         — single-poll wind speed change
-  heavy_precipitation                — hourly rate threshold
+  feels_like_gap                     — apparent vs actual divergence > 6.0°C
+  dangerous_wind                     — absolute wind speed > 70.0 km/h
+  wind_shift                         — single-poll wind speed change > 30.0 km/h
+  heavy_precipitation                — precipitation > 7.5 mm per reading
   precip_streak                      — consecutive readings with measurable rain/snow
   weather_code_severity              — WMO code tier escalation
-  cross_city_divergence              — one city outlier vs the other two
+  cross_city_divergence              — max(city temps) − min(city temps) > 20.0°C
+                                       (city="ALL"; metrics include ottawa, toronto,
+                                       vancouver, spread, warmest, coldest)
 
 When asked to review an event detector method, check ALL of the following:
 
@@ -38,10 +40,12 @@ When asked to review an event detector method, check ALL of the following:
    - city_anomaly requires _CITY_ANOMALY_MIN_HISTORY (6) readings
    - sudden_temp_drop/rise requires at least 1 history reading
    - precip_streak requires _PRECIP_STREAK_LENGTH − 1 (2) history readings
+   - wind_shift requires at least 1 history reading
+   - weather_code_severity requires at least 1 history reading
    Without a guard, the detector produces false positives on startup.
 
 2. THRESHOLD CALIBRATION
-   State the exact threshold value and constant name (e.g., _DANGEROUS_WIND_KMH=80.0).
+   State the exact threshold value and constant name (e.g., _DANGEROUS_WIND_KMH=70.0).
    Ask: "Would this fire on a typical Ottawa January day? A typical Vancouver October?"
    If yes to either, it is too sensitive. If it would never fire in a genuine event
    for one city, it is too conservative. Reference the specific city and season.

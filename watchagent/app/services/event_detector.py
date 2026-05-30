@@ -110,7 +110,7 @@ _KEY_METRIC: dict[str, str] = {
     "city_anomaly":          "z_score",
     "feels_like_gap":        "gap",
     "dangerous_wind":        "wind_speed",
-    "wind_shift":            "wind_delta",
+    "wind_shift":            "delta",
     "heavy_precipitation":   "precipitation",
     "precip_streak":         "streak_length",
     "weather_code_severity": "weather_code",

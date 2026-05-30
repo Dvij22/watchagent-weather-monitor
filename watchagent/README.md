@@ -108,10 +108,10 @@ curl "http://localhost:8000/events?city=Vancouver&limit=5"
       "event_type": "heavy_precipitation",
       "timestamp": "2024-01-15T09:00:00Z",
       "summary": "Vancouver recorded 14.2 mm in one hour — 1.4× the 10 mm/h heavy precipitation threshold.",
-      "reason": "Hourly precipitation of 14.2 mm exceeds the 10.0 mm/h heavy precipitation threshold by 4.2 mm.",
+      "reason": "Hourly precipitation of 14.2 mm exceeds the 7.5 mm heavy precipitation threshold by 6.7 mm.",
       "metrics": {
         "precipitation": 14.2,
-        "threshold": 10.0,
+        "threshold": 7.5,
         "excess_over_threshold": 4.2,
         "multiplier": 1.4
       },
@@ -130,7 +130,7 @@ pip install -e ".[dev]"
 pytest tests/ -v --cov=app --cov-report=term-missing
 ```
 
-Tests use SQLite in-memory with `StaticPool` — no running Postgres required. All 67 tests complete in under one second.
+Tests use SQLite in-memory with `StaticPool` — no running Postgres required. All 75 tests complete in under one second.
 
 The suite covers:
 - **Deduplication** — repository-level and via mocked WeatherClient returning the same payload twice; both assert `db.query(WeatherReading).count() == 1`
@@ -201,7 +201,7 @@ Scope: `app/services/event_detector.py` and `tests/test_event_detection.py` only
 ### Skills
 
 **`data_analysis.py`**
-A CLI tool with four analysis modes that queries the live database and prints structured output. Use it to answer operational questions — "how many events fired this week?", "which city's temperature range was widest?", "what were the most anomalous readings?" — without opening a DB client or writing ad-hoc SQL. Each mode is designed to be parseable at a glance: `summary` gives per-city row counts and temperature ranges, `trends` renders an ASCII bar chart of 7-day average temperatures, `anomalies` lists every `city_anomaly` event with its z-score, and `compare` shows current conditions side-by-side for all three cities.
+A CLI tool with four analysis modes that queries the live database and prints structured output. Use it to answer operational questions — "how many events fired this week?", "which city's temperature range was widest?", "what were the most anomalous readings?" — without opening a DB client or writing ad-hoc SQL. Each mode is designed to be parseable at a glance: `summary` gives per-city row counts and latest temperatures, `trends` renders an ASCII scatter chart of raw temperature readings over the last 7 days, `anomalies` lists every `city_anomaly` event with its z-score, and `compare` shows current conditions side-by-side for all three cities with 24-hour context.
 
 ```bash
 # Run from inside the api container (DATABASE_URL is already configured from .env)
