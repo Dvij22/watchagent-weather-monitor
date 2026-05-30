@@ -151,7 +151,7 @@ def test_feels_like_gap_fires():
 
 
 def test_feels_like_gap_no_fire():
-    """6°C gap (temp=5, apparent=-1) is below the 8°C threshold."""
+    """6°C gap (temp=5, apparent=-1) is exactly at the 6°C boundary — must not fire (≤ check)."""
     events = _detect(sample_reading(temperature=5.0, apparent_temperature=-1.0))
     assert "feels_like_gap" not in _event_types(events)
 
@@ -175,8 +175,8 @@ def test_dangerous_wind_fires():
 
 
 def test_dangerous_wind_no_fire():
-    """79 km/h is below the 80 km/h threshold."""
-    events = _detect(sample_reading(wind_speed=79.0))
+    """69 km/h is below the 70 km/h threshold."""
+    events = _detect(sample_reading(wind_speed=69.0))
     assert "dangerous_wind" not in _event_types(events)
 
 
@@ -185,16 +185,16 @@ def test_dangerous_wind_no_fire():
 # ---------------------------------------------------------------------------
 
 def test_wind_shift_fires():
-    """50 km/h change (prev=10, new=60) exceeds the 40 km/h threshold."""
+    """50 km/h change (prev=10, new=60) exceeds the 30 km/h threshold."""
     history = [_history_reading(wind_speed=10.0)]
     events = _detect(sample_reading(wind_speed=60.0), history)
     assert "wind_shift" in _event_types(events)
 
 
 def test_wind_shift_no_fire():
-    """30 km/h change (prev=10, new=40) is below the 40 km/h threshold."""
+    """20 km/h change (prev=10, new=30) is below the 30 km/h threshold."""
     history = [_history_reading(wind_speed=10.0)]
-    events = _detect(sample_reading(wind_speed=40.0), history)
+    events = _detect(sample_reading(wind_speed=30.0), history)
     assert "wind_shift" not in _event_types(events)
 
 
@@ -209,8 +209,8 @@ def test_heavy_precipitation_fires():
 
 
 def test_heavy_precipitation_no_fire():
-    """9 mm is below the 10 mm/h threshold."""
-    events = _detect(sample_reading(precipitation=9.0))
+    """7 mm is below the 7.5 mm/h threshold."""
+    events = _detect(sample_reading(precipitation=7.0))
     assert "heavy_precipitation" not in _event_types(events)
 
 
