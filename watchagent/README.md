@@ -192,14 +192,19 @@ Locks the event dict to exactly six keys (`city`, `event_type`, `timestamp`, `su
 **`repository.mdc`**
 Enforces that all database queries in the codebase go through repository classes (`ReadingRepository`, `EventRepository`) rather than being written inline in routes or services. The rule lists the exact method signatures available on each repository, specifies that new queries must be added as repository methods (not inline), and explains why: keeping `db.query()` calls inside repositories prevents a new endpoint from accidentally bypassing the ordering convention, session rollback pattern, or unique-constraint logic. This rule was created after discovering a direct `db.query(WeatherReading)` call in `readings.py` that bypassed `ReadingRepository` — the violation was fixed by adding `get_all()` to the repository.
 
-### Agent
+### Agents
 
 **`EventDetectionReviewer`**
-A scoped senior-engineer persona that reviews the ten event detectors (`sudden_temp_drop`, `sudden_temp_rise`, `city_anomaly`, `feels_like_gap`, `dangerous_wind`, `wind_shift`, `heavy_precipitation`, `precip_streak`, `weather_code_severity`, `cross_city_divergence`) against six criteria: cold-start guard, Canadian climate calibration, schema compliance, reason string quality, paired fire/no-fire tests, and cooldown coverage. It reviews against real climate context — Ottawa's −30 °C winters and Ottawa vs Vancouver's contrasting variability — not generic thresholds. The agent is read-only by design: it produces specific line-level critiques but does not write new detectors, because detection code without paired tests is worse than no detection code.
+A scoped senior-engineer persona that reviews the ten event detectors against six criteria: cold-start guard, Canadian climate calibration, schema compliance, reason string quality, paired fire/no-fire tests, and cooldown coverage. It reviews against real climate context — Ottawa's −30 °C winters and Ottawa vs Vancouver's contrasting variability — not generic thresholds. The agent is read-only by design: it produces specific line-level critiques but does not write new detectors, because detection code without paired tests is worse than no detection code. After each session that produces a change, it appends a structured entry to `.cursor/agents/session_log.md`.
 
-The agent directly influenced three concrete decisions in the final code. In the first session it flagged that `_check_sudden_temp_rise` was missing the `if not history: return None` cold-start guard that `_check_sudden_temp_drop` had — a latent `IndexError` on the second poll of a fresh deployment. In the second session it identified that `_FEELS_LIKE_GAP_THRESHOLD = 8.0` would suppress Ottawa's most common wind-chill scenario (a 6.8 °C gap at 35 km/h, documented in live data) and recommended lowering to 6.0 °C based on Environment Canada's 5–8 °C guidance range. In the third session it pointed out that `_DANGEROUS_WIND_KMH = 80.0` fired only after the official warning threshold was already exceeded, meaning the entire 60–80 km/h advisory window was invisible to the system; the threshold was lowered to 70 km/h so the monitor leads the official advisory rather than trailing it. See `.cursor/agents/session_log.md` for the full interaction records.
+The agent directly influenced four concrete decisions in the final code. In Session 1 it flagged that `_check_sudden_temp_rise` was missing a cold-start guard — a latent `IndexError` on the second poll of a fresh deployment. In Session 2 it identified that `_FEELS_LIKE_GAP_THRESHOLD = 8.0` would suppress Ottawa's most common wind-chill scenario and recommended lowering to 6.0 °C. In Session 3 it pointed out that `_DANGEROUS_WIND_KMH = 80.0` fired only after the official warning threshold was already exceeded, so it was lowered to 70 km/h. In Session 4 it caught the critical history-ordering bug: history was fetched *after* the reading was inserted, so `history[0]` was always the current reading itself — silently preventing four event types from ever firing. See `.cursor/agents/session_log.md` for full interaction records.
 
 Scope: `app/services/event_detector.py` and `tests/test_event_detection.py` only.
+
+**`ThresholdCalibrator`**
+A data-driven calibration reviewer that evaluates whether the numeric threshold *values* produce a useful signal-to-noise ratio against actual historical data. Its role is complementary and non-overlapping with `EventDetectionReviewer`: the reviewer checks that the code correctly implements the intended logic; the calibrator checks that the intended thresholds are right given observed conditions. The agent knows all current threshold constants and the Canadian climate profiles for all three cities. Its workflow is to ask for `replay_detection.py` output, compute an empirical fire rate per event type, and return a per-threshold verdict: `WELL_CALIBRATED`, `TOO_SENSITIVE`, `TOO_CONSERVATIVE`, or `INSUFFICIENT_DATA`. It does not modify any files — it produces a calibration report and proposed constant changes only. This makes it safe to run after any threshold adjustment without risk of cascading edits.
+
+Scope: `app/services/event_detector.py` constants only. Uses `replay_detection.py` output as evidence.
 
 ### Skills
 
@@ -213,6 +218,30 @@ docker compose exec api python .cursor/skills/data_analysis.py --question events
 docker compose exec api python .cursor/skills/data_analysis.py --question trends
 docker compose exec api python .cursor/skills/data_analysis.py --question anomalies
 docker compose exec api python .cursor/skills/data_analysis.py --question compare
+```
+
+Example `--question events` output after a day of collection:
+
+```
+=== All Detected Events (7 total) ===
+
+  Event type                      Count
+  ------------------------------  -----
+  sudden_temp_rise                    3
+  city_anomaly                        2
+  feels_like_gap                      1
+  wind_shift                          1
+
+  — 10 most recent events —
+
+  2026-05-31 15:00 UTC  Ottawa        city_anomaly  z_score=2.43
+    Ottawa temperature (28.4°C) is 2.4σ above its 6-reading baseline — statistically anomalous.
+
+  2026-05-31 12:00 UTC  Vancouver     feels_like_gap  gap=7.2
+    Vancouver feels 7.2°C colder than the thermometer reads: apparent 8.3°C vs actual 15.5°C (wind chill).
+
+  2026-05-31 09:00 UTC  Ottawa        sudden_temp_rise  delta=4.1
+    Ottawa surged 4.1°C in a single poll — from 10.2°C up to 14.3°C.
 ```
 
 **`replay_detection.py`**

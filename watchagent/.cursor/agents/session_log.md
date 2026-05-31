@@ -133,5 +133,54 @@ explicitly.
 
 ---
 
+## Session 4 — Reviewing `_run_event_detection` history ordering
+
+**I asked:**
+
+> Review the sequence of operations in `_handle_reading` in `app/services/poller.py`.
+> History is passed to `detect_events` — is it fetched before or after the reading
+> is inserted into the database? Does the order matter?
+
+**Agent flagged:**
+
+> The history is fetched **after** `reading_repo.insert(reading)` commits the new
+> row. This means `history[0]` — the most recent reading — is the current reading
+> itself. For every delta-based check:
+>
+> - `_check_sudden_temp_drop`: `delta = history[0].temperature - new.temperature`
+>   → `history[0].temperature == new.temperature` → delta is always 0 → **never fires**
+> - `_check_sudden_temp_rise`: same problem → **never fires**
+> - `_check_wind_shift`: `delta = abs(new.wind_speed - history[0].wind_speed)`
+>   → always 0 → **never fires**
+> - `_check_weather_code_severity`: `prev_tier = _wmo_tier(history[0].weather_code)`
+>   → always same tier as current → **never fires**
+>
+> Four of the nine per-city event types were silently broken. The tests did not
+> catch this because they pass a manually constructed `history` list that does
+> not include the current reading — the tests were correct, but the production
+> code path was wrong.
+>
+> Fix: fetch history before calling `reading_repo.insert()`. Move the
+> `reading_repo.get_recent()` call to before the insert, so `history[0]`
+> is the previous reading, not the current one.
+
+**Change made:**
+
+Reordered the operations in `_handle_reading` (`app/services/poller.py`):
+```python
+# Before (broken order):
+row = reading_repo.insert(reading)      # commits new row first
+history = reading_repo.get_recent(...)  # history[0] is the new row itself
+
+# After (correct order):
+history = reading_repo.get_recent(...)  # history is previous readings only
+row = reading_repo.insert(reading)      # then insert; history[0] is prior reading
+```
+
+Added a comment documenting the ordering requirement so it is not accidentally
+reversed in a future refactor.
+
+---
+
 *Log maintained in `.cursor/agents/session_log.md`. One entry per substantive
 agent review session that produced a code or test change.*
