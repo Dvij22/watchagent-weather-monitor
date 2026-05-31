@@ -1,0 +1,49 @@
+---
+All database access in WatchAgent (app/) must go through repository classes.
+
+REPOSITORIES:
+  ReadingRepository  (app/repositories/reading_repo.py)
+    .insert(reading: RawReading)         → WeatherReading | None
+    .get_recent(city, limit)             → list[WeatherReading]
+    .get_all(city, limit)                → list[WeatherReading]
+
+  EventRepository  (app/repositories/event_repo.py)
+    .insert(event_data: dict)            → WeatherEvent
+    .get_all(city, limit)                → list[WeatherEvent]
+
+RULES:
+- Routes (app/api/routes/) MUST use a repository instance. They MUST NOT call
+  db.query() or db.execute() directly. Import the repository, instantiate it
+  with the injected Session, and call its methods.
+
+  CORRECT:
+    repo = ReadingRepository(db)
+    rows = repo.get_recent(city, limit=limit)
+
+  WRONG (will be flagged):
+    db.query(WeatherReading).filter(...).all()
+
+- Services (app/services/) MUST use repositories for all persistence.
+  The only exception is ReadingRepository calling db.query() internally —
+  that is the repository implementation, not a violation.
+
+- When a new query is needed (e.g., a new API filter, a count endpoint),
+  add a method to the relevant repository. Do NOT write the query inline
+  in the route or service that needs it.
+
+- Repositories receive a Session from the caller. They do NOT create their
+  own SessionLocal(). Session lifetime is the caller's responsibility.
+  Exception: _run_cross_city_detection in poller.py opens its own session
+  because it runs after per-city sessions have been closed — this is
+  intentional and documented.
+
+- Repositories commit inside their own methods (current design). Do NOT
+  add extra db.commit() calls in routes or services.
+
+WHY:
+  Keeping all db.query() calls inside repositories means a new engineer
+  (or Cursor) adding an endpoint cannot accidentally bypass the unique-
+  constraint check, the ordering convention (timestamp.desc()), or the
+  session rollback pattern. It also keeps routes thin and testable without
+  touching ORM internals.
+---

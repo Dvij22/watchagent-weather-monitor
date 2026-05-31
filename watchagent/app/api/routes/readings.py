@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.reading import WeatherReading
 from app.repositories.reading_repo import ReadingRepository
 from app.schemas.reading import ReadingOut
 
@@ -28,12 +27,7 @@ async def get_readings(
     if city is not None:
         rows = repo.get_recent(city, limit=limit)
     else:
-        rows = (
-            db.query(WeatherReading)
-            .order_by(WeatherReading.timestamp.desc())
-            .limit(limit)
-            .all()
-        )
+        rows = repo.get_all(limit=limit)
 
     request.state.results_returned = len(rows)
     return {"readings": [ReadingOut.model_validate(r) for r in rows]}

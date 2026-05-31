@@ -3,6 +3,7 @@
 Usage (run from the watchagent/ directory):
     python .cursor/skills/data_analysis.py --question summary
     python .cursor/skills/data_analysis.py --question trends
+    python .cursor/skills/data_analysis.py --question events
     python .cursor/skills/data_analysis.py --question anomalies
     python .cursor/skills/data_analysis.py --question compare
 
@@ -260,8 +261,53 @@ def question_trends(session: "Session") -> None:
     print()
 
 
+def question_events(session: "Session") -> None:
+    """All stored events across all ten event types, grouped by type with counts."""
+    from app.models.event import WeatherEvent
+    from collections import Counter
+
+    all_events = (
+        session.query(WeatherEvent)
+        .order_by(WeatherEvent.timestamp.desc())
+        .all()
+    )
+
+    print(f"\n=== All Detected Events ({len(all_events)} total) ===")
+
+    if not all_events:
+        print("No events recorded yet.")
+        return
+
+    # Summary table: count per type
+    counts = Counter(e.event_type for e in all_events)
+    print(f"\n  {'Event type':<30}  Count")
+    print(f"  {'-'*30}  -----")
+    for event_type, count in sorted(counts.items(), key=lambda x: -x[1]):
+        print(f"  {event_type:<30}  {count}")
+
+    # Show the 10 most recent events in full
+    recent = all_events[:10]
+    print(f"\n  — 10 most recent events —")
+    for e in recent:
+        # Pick the single most informative metric value for quick reading
+        key_metrics = {
+            "sudden_temp_drop": "delta", "sudden_temp_rise": "delta",
+            "city_anomaly": "z_score", "feels_like_gap": "gap",
+            "dangerous_wind": "wind_speed", "wind_shift": "delta",
+            "heavy_precipitation": "precipitation", "precip_streak": "streak_length",
+            "weather_code_severity": "weather_code", "cross_city_divergence": "spread",
+        }
+        mk = key_metrics.get(e.event_type)
+        mv = e.metrics.get(mk) if mk else None
+        metric_str = f"  {mk}={mv}" if mk and mv is not None else ""
+        print(
+            f"\n  {_fmt_ts(e.timestamp)}  {e.city:<12}  {e.event_type}{metric_str}"
+            f"\n    {e.summary}"
+        )
+
+
 def question_anomalies(session: "Session") -> None:
-    """All city_anomaly events with z-score, temperature, and mean."""
+    """Detailed breakdown of city_anomaly events with z-score and baseline stats."""
     from app.models.event import WeatherEvent
 
     events = (
@@ -274,7 +320,9 @@ def question_anomalies(session: "Session") -> None:
     print(f"\n=== City Anomaly Events ({len(events)} total) ===")
 
     if not events:
-        print("No city_anomaly events recorded.")
+        print("No city_anomaly events recorded yet.")
+        print("(city_anomaly requires 6+ stored readings per city to compute a baseline.)")
+        print("Run '--question events' to see all event types currently in the database.")
         return
 
     for e in events:
@@ -389,6 +437,7 @@ def question_compare(session: "Session") -> None:
 _QUESTIONS = {
     "summary":   question_summary,
     "trends":    question_trends,
+    "events":    question_events,
     "anomalies": question_anomalies,
     "compare":   question_compare,
 }

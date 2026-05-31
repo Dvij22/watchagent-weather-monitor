@@ -3,6 +3,7 @@ live database and return structured output. Run from the watchagent/ directory:
 
   python .cursor/skills/data_analysis.py --question summary
   python .cursor/skills/data_analysis.py --question trends
+  python .cursor/skills/data_analysis.py --question events
   python .cursor/skills/data_analysis.py --question anomalies
   python .cursor/skills/data_analysis.py --question compare
 

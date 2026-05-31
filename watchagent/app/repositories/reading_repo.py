@@ -51,6 +51,15 @@ class ReadingRepository:
             )
             return None
 
+    def get_all(self, limit: int = 50) -> list[WeatherReading]:
+        """Return up to *limit* most recent readings across all cities, newest first."""
+        return (
+            self._db.query(WeatherReading)
+            .order_by(WeatherReading.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
+
     def get_recent(self, city: str, limit: int = 24) -> list[WeatherReading]:
         """Return up to *limit* most recent readings for *city*, newest first."""
         return (

@@ -189,6 +189,9 @@ Specifies which `structlog` event key and exact field set to use at each log lev
 **`event_schema.mdc`**
 Locks the event dict to exactly six keys (`city`, `event_type`, `timestamp`, `summary`, `reason`, `metrics`) and the `event_type` to one of the ten allowed strings. It specifies which metric keys each event type must include — for example, every threshold-based event must carry a `"threshold"` key so downstream consumers never have to guess what value triggered it. The `reason` field must include both the actual measured value and the threshold crossed. Without this rule, detectors drift into undocumented formats over iterations, making stored events uninterpretable without reading source code.
 
+**`repository.mdc`**
+Enforces that all database queries in the codebase go through repository classes (`ReadingRepository`, `EventRepository`) rather than being written inline in routes or services. The rule lists the exact method signatures available on each repository, specifies that new queries must be added as repository methods (not inline), and explains why: keeping `db.query()` calls inside repositories prevents a new endpoint from accidentally bypassing the ordering convention, session rollback pattern, or unique-constraint logic. This rule was created after discovering a direct `db.query(WeatherReading)` call in `readings.py` that bypassed `ReadingRepository` — the violation was fixed by adding `get_all()` to the repository.
+
 ### Agent
 
 **`EventDetectionReviewer`**
@@ -201,11 +204,12 @@ Scope: `app/services/event_detector.py` and `tests/test_event_detection.py` only
 ### Skills
 
 **`data_analysis.py`**
-A CLI tool with four analysis modes that queries the live database and prints structured output. Use it to answer operational questions — "how many events fired this week?", "which city's temperature range was widest?", "what were the most anomalous readings?" — without opening a DB client or writing ad-hoc SQL. Each mode is designed to be parseable at a glance: `summary` gives per-city row counts and latest temperatures, `trends` renders an ASCII scatter chart of raw temperature readings over the last 7 days, `anomalies` lists every `city_anomaly` event with its z-score, and `compare` shows current conditions side-by-side for all three cities with 24-hour context.
+A CLI tool with five analysis modes that queries the live database and prints structured output. Use it to answer operational questions — "how many events fired this week?", "which city's temperature range was widest?", "what were the most anomalous readings?" — without opening a DB client or writing ad-hoc SQL. Each mode is designed to be parseable at a glance: `summary` gives per-city row counts and latest temperatures, `events` shows the full event log across all ten event types (count per type plus the 10 most recent), `trends` renders an ASCII scatter chart of raw temperature readings over the last 7 days, `anomalies` gives a deep-dive breakdown of `city_anomaly` events with z-scores and baseline statistics, and `compare` shows current conditions side-by-side for all three cities with 24-hour context.
 
 ```bash
 # Run from inside the api container (DATABASE_URL is already configured from .env)
 docker compose exec api python .cursor/skills/data_analysis.py --question summary
+docker compose exec api python .cursor/skills/data_analysis.py --question events
 docker compose exec api python .cursor/skills/data_analysis.py --question trends
 docker compose exec api python .cursor/skills/data_analysis.py --question anomalies
 docker compose exec api python .cursor/skills/data_analysis.py --question compare

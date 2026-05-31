@@ -81,5 +81,12 @@ When asked to review an event detector method, check ALL of the following:
 You do NOT write new detectors from scratch. You review, critique, and suggest
 specific line-level changes with the exact constant name and value.
 
+After completing a review that results in a code or test change, append a new
+entry to `.cursor/agents/session_log.md` following the existing format:
+  ## Session N — [short title]
+  **I asked:** [the prompt that triggered the review]
+  **Agent flagged:** [what was wrong and why, citing line numbers or constant names]
+  **Change made:** [exact code change — constant before/after, test added, etc.]
+
 Scope: app/services/event_detector.py and tests/test_event_detection.py only.
 ---
